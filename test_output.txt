@@ -1,0 +1,30 @@
+
+ RUN  v4.1.8 /Users/akshaybankapure/craftman
+
+stdout | src/solver/__tests__/area.test.ts > Area Stability Test > should converge 6 rooms to target area within 16ms
+Converged 6 rooms in 42.05ms
+room_0_0 area: 26.98
+
+ × src/solver/__tests__/area.test.ts > Area Stability Test > should converge 6 rooms to target area within 16ms 46ms
+   → expected 26.98199402644538 to be greater than 28
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/solver/__tests__/area.test.ts > Area Stability Test > should converge 6 rooms to target area within 16ms
+AssertionError: expected 26.98199402644538 to be greater than 28
+ ❯ src/solver/__tests__/area.test.ts:146:20
+    144|       const area = Math.abs(polygonArea(pts));
+    145|       console.log(`${id} area: ${area.toFixed(2)}`);
+    146|       expect(area).toBeGreaterThan(28.0);
+       |                    ^
+    147|       expect(area).toBeLessThan(32.0);
+    148|     }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  17:37:47
+   Duration  213ms (transform 45ms, setup 0ms, import 61ms, tests 47ms, environment 0ms)
+

@@ -1,0 +1,52 @@
+
+  VITE v8.0.16  ready in 125 ms
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://192.168.1.162:3000/
+6:09:52 PM [vite] (client) Pre-transform error: Failed to resolve import "./types" from "src/utils/ai.ts". Does the file exist?
+  Plugin: vite:import-analysis
+  File: /Users/akshaybankapure/craftman/src/utils/ai.ts:1:33
+  1  |  import { FloorGraph, Vec2 } from "./types";
+     |                                    ^
+  2  |  export function createPlotFromText(text) {
+  3  |  	const graph = {
+6:09:52 PM [vite] Internal server error: Failed to resolve import "./types" from "src/utils/ai.ts". Does the file exist?
+  Plugin: vite:import-analysis
+  File: /Users/akshaybankapure/craftman/src/utils/ai.ts:1:33
+  1  |  import { FloorGraph, Vec2 } from "./types";
+     |                                    ^
+  2  |  export function createPlotFromText(text) {
+  3  |  	const graph = {
+      at TransformPluginContext._formatLog (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///Users/akshaybankapure/craftman/node_modules/vite/dist/node/chunks/node.js:24440:20)
+6:10:15 PM [vite] (client) hmr update /src/App.tsx
+6:10:15 PM [vite] (client) [Unhandled error] SyntaxError: The requested module '/src/types/index.ts' does not provide an export named 'FloorGraph'
+
+6:10:21 PM [vite] (client) [Unhandled error] SyntaxError: The requested module '/src/types/index.ts' does not provide an export named 'FloorGraph'
+
+6:10:32 PM [vite] (client) [Unhandled error] SyntaxError: The requested module '/src/types/index.ts' does not provide an export named 'FloorGraph'
+
+6:10:33 PM [vite] (client) [Unhandled error] SyntaxError: The requested module '/src/types/index.ts' does not provide an export named 'FloorGraph'
+
+6:11:16 PM [vite] (client) [Unhandled error] SyntaxError: The requested module '/src/types/index.ts' does not provide an export named 'FloorGraph'
+
+6:11:32 PM [vite] (client) hmr update /src/App.tsx
+6:11:41 PM [vite] (client) hmr update /src/App.tsx
+6:12:14 PM [vite] (client) hmr update /src/App.tsx
+6:12:20 PM [vite] (client) hmr update /src/components/PlanViewer2D.tsx
+6:12:25 PM [vite] (client) hmr update /src/components/MassingViewer3D.tsx
+6:12:37 PM [vite] (client) hmr update /src/App.tsx
+6:13:19 PM [vite] (client) hmr update /src/App.tsx
+6:20:54 PM [vite] (client) hmr update /src/components/PlanViewer2D.tsx
+6:21:33 PM [vite] (client) hmr update /src/App.tsx
+6:27:07 PM [vite] (client) hmr update /src/App.tsx
+6:42:17 PM [vite] changed tsconfig file detected: /Users/akshaybankapure/craftman/tsconfig.json - Clearing cache and forcing full-reload to ensure TypeScript is compiled with updated config values.
+6:42:38 PM [vite] (client) hmr update /src/components/PlanViewer2D.tsx
+6:43:31 PM [vite] (client) hmr update /src/App.tsx
