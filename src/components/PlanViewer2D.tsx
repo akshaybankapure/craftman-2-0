@@ -2,6 +2,8 @@ import React from 'react';
 import type { FloorGraph, Vec2 } from '../types/index';
 import { polygonArea } from '../geometry/vec2';
 import type { EntranceDirection } from '../planner/ProgramBuilder';
+import type { FlowInfo } from '../optimizer/objectives';
+import type { FloorPlan } from '../planner/types';
 
 interface RoomColorDef {
   bg: string;
@@ -14,11 +16,12 @@ interface PlanViewer2DProps {
   width: number;
   height: number;
   showGraphOverlay?: boolean;
-  flowData?: {
-    pathLengths: Map<string, number>;
-  } | null;
+  flowData?: FlowInfo | null;
   entranceDirection?: EntranceDirection;
   roomColors?: Record<string, RoomColorDef>;
+  /** Topology-first plan with physical doors / debug data. */
+  floorPlan?: FloorPlan | null;
+  showDebugOverlay?: boolean;
 }
 
 const DEFAULT_COLORS: Record<string, RoomColorDef> = {
@@ -26,18 +29,24 @@ const DEFAULT_COLORS: Record<string, RoomColorDef> = {
   kitchen:  { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981', label: '#34d399' },
   bedroom:  { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6', label: '#60a5fa' },
   bathroom: { bg: 'rgba(6, 182, 212, 0.12)',  border: '#06b6d4', label: '#22d3ee' },
+  ensuite:  { bg: 'rgba(6, 182, 212, 0.18)',  border: '#0891b2', label: '#22d3ee' },
   corridor: { bg: 'rgba(100, 116, 139, 0.08)', border: '#64748b', label: '#94a3b8' },
   entry:    { bg: 'rgba(139, 92, 246, 0.12)', border: '#8b5cf6', label: '#a78bfa' },
+  foyer:    { bg: 'rgba(139, 92, 246, 0.08)', border: '#a78bfa', label: '#c4b5fd' },
+  utility:  { bg: 'rgba(161, 161, 170, 0.10)', border: '#a1a1aa', label: '#d4d4d8' },
+  balcony:  { bg: 'rgba(52, 211, 153, 0.10)', border: '#34d399', label: '#6ee7b7' },
 };
 
-export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({ 
-  graph, 
-  width, 
+export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
+  graph,
+  width,
   height,
   showGraphOverlay = false,
   flowData = null,
   entranceDirection = 'S',
   roomColors,
+  floorPlan = null,
+  showDebugOverlay = false,
 }) => {
   const colors = roomColors || DEFAULT_COLORS;
   const padding = 60;
@@ -56,7 +65,6 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
   const tx = (x: number) => (x - minX) * svgScale + padding;
   const ty = (y: number) => (y - minY) * svgScale + padding;
 
-  // Compute room centroids
   const faceCentroids = new Map<string, Vec2>();
   for (const [faceId, face] of graph.faces) {
     const pts = face.loop.map(id => graph.vertices.get(id)!.pos);
@@ -65,57 +73,65 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
     faceCentroids.set(faceId, { x: cx, y: cy });
   }
 
-  // Count room types for labeling (Bedroom 1, Bedroom 2, etc.)
   const typeCounters = new Map<string, number>();
   const typeTotals = new Map<string, number>();
   for (const face of graph.faces.values()) {
     typeTotals.set(face.type, (typeTotals.get(face.type) || 0) + 1);
   }
 
-  // Build dual graph edges for overlay
   const hasEntry = Array.from(graph.faces.values()).some(f => f.type === 'entry');
   const actualShowGraphOverlay = showGraphOverlay && hasEntry;
 
-  const faceEdges: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  // Portal routes through doors (prefer FloorPlan routes)
+  const routePaths: string[] = [];
   if (actualShowGraphOverlay) {
-    const edgeToFaces = new Map<string, string[]>();
-    for (const [faceId, face] of graph.faces) {
-      const loop = face.loop;
-      const n = loop.length;
-      for (let i = 0; i < n; i++) {
-        const v1 = loop[i];
-        const v2 = loop[(i + 1) % n];
-        const sortedEdgeKey = v1 < v2 ? `${v1}-${v2}` : `${v2}-${v1}`;
-        for (const [edgeId, edge] of graph.edges) {
-          const ea = edge.a;
-          const eb = edge.b;
-          const eKey = ea < eb ? `${ea}-${eb}` : `${eb}-${ea}`;
-          if (eKey === sortedEdgeKey) {
-            const list = edgeToFaces.get(edgeId) ?? [];
-            list.push(faceId);
-            edgeToFaces.set(edgeId, list);
-            break;
+    if (floorPlan) {
+      const internal = floorPlan.doors.filter(d => d.roomBId !== '__EXTERIOR__');
+      for (const d of internal) {
+        const route = floorPlan.routes.find(
+          r =>
+            (r.roomAId === d.roomAId && r.roomBId === d.roomBId) ||
+            (r.roomAId === d.roomBId && r.roomBId === d.roomAId),
+        );
+        const pts = route?.points;
+        if (pts && pts.length >= 2) {
+          routePaths.push(
+            pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${tx(p.x)} ${ty(p.y)}`).join(' '),
+          );
+        } else {
+          const cA = faceCentroids.get(d.roomAId);
+          const cB = faceCentroids.get(d.roomBId);
+          if (cA && cB) {
+            routePaths.push(
+              `M ${tx(cA.x)} ${ty(cA.y)} L ${tx(d.position.x)} ${ty(d.position.y)} L ${tx(cB.x)} ${ty(cB.y)}`,
+            );
+          }
+        }
+      }
+    } else if (flowData?.edges) {
+      for (const edge of flowData.edges) {
+        if (edge.route && edge.route.length >= 2) {
+          routePaths.push(
+            edge.route.map((p, i) => `${i === 0 ? 'M' : 'L'} ${tx(p.x)} ${ty(p.y)}`).join(' '),
+          );
+        } else {
+          const cA = faceCentroids.get(edge.faceA);
+          const cB = faceCentroids.get(edge.faceB);
+          if (cA && cB && edge.doorPt) {
+            routePaths.push(
+              `M ${tx(cA.x)} ${ty(cA.y)} L ${tx(edge.doorPt.x)} ${ty(edge.doorPt.y)} L ${tx(cB.x)} ${ty(cB.y)}`,
+            );
           }
         }
       }
     }
-    for (const [_, faces] of edgeToFaces) {
-      if (faces.length === 2) {
-        const [fa, fb] = faces;
-        const cA = faceCentroids.get(fa)!;
-        const cB = faceCentroids.get(fb)!;
-        faceEdges.push({
-          x1: tx(cA.x), y1: ty(cA.y),
-          x2: tx(cB.x), y2: ty(cB.y),
-        });
-      }
-    }
   }
 
-  // Compass rose position (top-right of viewport)
   const compassCx = width - 60;
   const compassCy = 80;
   const compassR = 28;
+
+  const doors = floorPlan?.doors ?? [];
 
   return (
     <svg width={width} height={height} style={{ background: 'transparent' }}>
@@ -127,37 +143,25 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
             <feMergeNode in="SourceGraphic"/>
           </feMerge>
         </filter>
-        <filter id="roomGlow">
-          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-          <feMerge>
-            <feMergeNode in="coloredBlur"/>
-            <feMergeNode in="SourceGraphic"/>
-          </feMerge>
-        </filter>
       </defs>
 
-      {/* ── Color-coded Room Faces ── */}
       {Array.from(graph.faces.values()).map(face => {
         const points = face.loop.map(vId => {
           const v = graph.vertices.get(vId)!;
           return `${tx(v.pos.x)},${ty(v.pos.y)}`;
         }).join(' ');
-        
+
         const centroid = faceCentroids.get(face.id)!;
         const cx = tx(centroid.x);
         const cy = ty(centroid.y);
         const pts = face.loop.map(id => graph.vertices.get(id)!.pos);
         const area = Math.abs(polygonArea(pts));
-
         const roomColor = colors[face.type] || { bg: 'rgba(255,255,255,0.05)', border: '#555', label: '#999' };
-
-        // Compute room dimensions
         const xs = pts.map(p => p.x);
         const ys = pts.map(p => p.y);
         const roomW = Math.max(...xs) - Math.min(...xs);
         const roomH = Math.max(...ys) - Math.min(...ys);
 
-        // Label: "Bedroom 1" if there are multiple bedrooms, just "Bedroom" if only one
         const total = typeTotals.get(face.type) || 1;
         const counter = (typeCounters.get(face.type) || 0) + 1;
         typeCounters.set(face.type, counter);
@@ -173,34 +177,32 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
               strokeWidth="1.5"
               strokeOpacity="0.6"
             />
-            {/* Room type label */}
-            <text 
-              x={cx} y={actualShowGraphOverlay ? cy - 18 : cy - 6} 
-              textAnchor="middle" 
-              fill={roomColor.label} 
-              style={{ 
-                fontSize: '11px', 
-                fontWeight: 700, 
-                textTransform: 'uppercase', 
+            <text
+              x={cx} y={actualShowGraphOverlay ? cy - 18 : cy - 6}
+              textAnchor="middle"
+              fill={roomColor.label}
+              style={{
+                fontSize: '11px',
+                fontWeight: 700,
+                textTransform: 'uppercase',
                 letterSpacing: '0.8px',
                 filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))',
               }}
             >
               {label}
             </text>
-            {/* Area + dimensions */}
-            <text 
-              x={cx} y={actualShowGraphOverlay ? cy + 26 : cy + 10} 
-              textAnchor="middle" 
-              fill="#94a3b8" 
+            <text
+              x={cx} y={actualShowGraphOverlay ? cy + 26 : cy + 10}
+              textAnchor="middle"
+              fill="#94a3b8"
               style={{ fontSize: '9px', fontWeight: 500 }}
             >
               {area.toFixed(1)}m²
             </text>
-            <text 
-              x={cx} y={actualShowGraphOverlay ? cy + 38 : cy + 22} 
-              textAnchor="middle" 
-              fill="#64748b" 
+            <text
+              x={cx} y={actualShowGraphOverlay ? cy + 38 : cy + 22}
+              textAnchor="middle"
+              fill="#64748b"
               style={{ fontSize: '7.5px' }}
             >
               {roomW.toFixed(1)}m × {roomH.toFixed(1)}m
@@ -209,7 +211,6 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         );
       })}
 
-      {/* ── Wall Edges ── */}
       {Array.from(graph.edges.values()).map(edge => {
         const vA = graph.vertices.get(edge.a)!;
         const vB = graph.vertices.get(edge.b)!;
@@ -227,7 +228,6 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         );
       })}
 
-      {/* ── Wall Junction Vertices ── */}
       {Array.from(graph.vertices.values()).map(v => (
         <circle
           key={v.id}
@@ -240,101 +240,104 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         />
       ))}
 
-      {/* ── Entry Door Arc ── */}
-      {Array.from(graph.faces.values())
+      {/* Physical doors: gap + swing arc */}
+      {doors.map(door => {
+        const px = tx(door.position.x);
+        const py = ty(door.position.y);
+        const doorSize = Math.max(8, door.width * svgScale * 0.55);
+        const isH = door.orientation === 'horizontal';
+        const gapHalf = (door.width * svgScale) / 2;
+        return (
+          <g key={door.id}>
+            {/* Opening gap */}
+            <line
+              x1={isH ? px - gapHalf : px}
+              y1={isH ? py : py - gapHalf}
+              x2={isH ? px + gapHalf : px}
+              y2={isH ? py : py + gapHalf}
+              stroke="#0f172a"
+              strokeWidth={4}
+              strokeLinecap="round"
+            />
+            <line
+              x1={isH ? px - gapHalf : px}
+              y1={isH ? py : py - gapHalf}
+              x2={isH ? px + gapHalf : px}
+              y2={isH ? py : py + gapHalf}
+              stroke={door.isEntrance ? '#8b5cf6' : '#38bdf8'}
+              strokeWidth={2}
+              strokeLinecap="round"
+            />
+            {/* Swing arc */}
+            <path
+              d={swingArcPath(px, py, doorSize, door.orientation, door.isEntrance ?? false)}
+              fill={door.isEntrance ? 'rgba(139, 92, 246, 0.12)' : 'rgba(56, 189, 248, 0.1)'}
+              stroke={door.isEntrance ? '#8b5cf6' : '#38bdf8'}
+              strokeWidth="1.2"
+              strokeDasharray="3 2"
+            />
+          </g>
+        );
+      })}
+
+      {/* Fallback decorative entry if no FloorPlan doors */}
+      {doors.length === 0 && Array.from(graph.faces.values())
         .filter(f => f.type === 'entry')
         .map(face => {
           const pts = face.loop.map(id => graph.vertices.get(id)!.pos);
           const xs = pts.map(p => p.x);
           const ys = pts.map(p => p.y);
-          const roomMinX = Math.min(...xs);
-          const roomMaxX = Math.max(...xs);
-          const roomMinY = Math.min(...ys);
-          const roomMaxY = Math.max(...ys);
-
-          // Place door arc on the entrance edge
-          let doorX: number, doorY: number, startAngle: number;
-          const doorSize = 12;
+          let doorX: number, doorY: number;
           switch (entranceDirection) {
             case 'S':
-              doorX = tx((roomMinX + roomMaxX) / 2);
-              doorY = ty(roomMaxY);
-              startAngle = 0;
+              doorX = tx((Math.min(...xs) + Math.max(...xs)) / 2);
+              doorY = ty(Math.max(...ys));
               break;
             case 'N':
-              doorX = tx((roomMinX + roomMaxX) / 2);
-              doorY = ty(roomMinY);
-              startAngle = 180;
+              doorX = tx((Math.min(...xs) + Math.max(...xs)) / 2);
+              doorY = ty(Math.min(...ys));
               break;
             case 'E':
-              doorX = tx(roomMaxX);
-              doorY = ty((roomMinY + roomMaxY) / 2);
-              startAngle = 270;
+              doorX = tx(Math.max(...xs));
+              doorY = ty((Math.min(...ys) + Math.max(...ys)) / 2);
               break;
             case 'W':
-              doorX = tx(roomMinX);
-              doorY = ty((roomMinY + roomMaxY) / 2);
-              startAngle = 90;
+              doorX = tx(Math.min(...xs));
+              doorY = ty((Math.min(...ys) + Math.max(...ys)) / 2);
               break;
           }
-
-          // Draw 90° arc
-          const a1 = (startAngle * Math.PI) / 180;
-          const a2 = ((startAngle + 90) * Math.PI) / 180;
-          const x1 = doorX + doorSize * Math.cos(a1);
-          const y1 = doorY + doorSize * Math.sin(a1);
-          const x2 = doorX + doorSize * Math.cos(a2);
-          const y2 = doorY + doorSize * Math.sin(a2);
-
           return (
-            <g key="door-arc">
-              <path
-                d={`M ${doorX} ${doorY} L ${x1} ${y1} A ${doorSize} ${doorSize} 0 0 1 ${x2} ${y2} Z`}
-                fill="rgba(139, 92, 246, 0.15)"
-                stroke="#8b5cf6"
-                strokeWidth="1.5"
-                strokeDasharray="3 2"
-              />
-              {/* Small door opening line */}
-              <line
-                x1={doorX - 6} y1={doorY}
-                x2={doorX + 6} y2={doorY}
-                stroke="#8b5cf6"
-                strokeWidth="3"
-                strokeLinecap="round"
-              />
+            <g key="door-arc-fallback">
+              <circle cx={doorX} cy={doorY} r="10" fill="rgba(139, 92, 246, 0.15)" stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="3 2" />
             </g>
           );
         })}
 
-      {/* ── Dual Graph Adjacency Overlay ── */}
-      {actualShowGraphOverlay && faceEdges.map((fe, i) => (
-        <line
-          key={`dual-edge-${i}`}
-          x1={fe.x1} y1={fe.y1}
-          x2={fe.x2} y2={fe.y2}
+      {/* Portal routes through doors */}
+      {actualShowGraphOverlay && routePaths.map((d, i) => (
+        <path
+          key={`route-${i}`}
+          d={d}
+          fill="none"
           stroke="#10b981"
           strokeWidth="2"
           strokeDasharray="4 4"
-          opacity="0.7"
+          opacity="0.75"
         />
       ))}
 
-      {/* ── Dual Graph Centrality Nodes ── */}
       {actualShowGraphOverlay && Array.from(graph.faces.values()).map(face => {
         const centroid = faceCentroids.get(face.id)!;
         const cx = tx(centroid.x);
         const cy = ty(centroid.y);
-        
         const depth = flowData?.pathLengths.get(face.id) ?? 999;
-        
         let nodeColor = '#fbbf24';
         if (depth === 0) nodeColor = '#10b981';
         else if (depth === 1) nodeColor = '#06b6d4';
         else if (depth === 2) nodeColor = '#fbbf24';
         else if (depth >= 3) nodeColor = '#ec4899';
         if (depth === 999) nodeColor = '#ef4444';
-        
+
         return (
           <g key={`dual-node-${face.id}`}>
             <circle
@@ -342,7 +345,6 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
               fill="rgba(15, 23, 42, 0.9)"
               stroke={nodeColor}
               strokeWidth="2"
-              style={{ filter: `drop-shadow(0 0 4px ${nodeColor})` }}
             />
             <text
               x={cx} y={cy + 3}
@@ -356,57 +358,110 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         );
       })}
 
-      {/* ── Compass Rose ── */}
+      {/* Dev debug overlay */}
+      {showDebugOverlay && floorPlan && (
+        <g opacity="0.9">
+          {/* Desired topology */}
+          {floorPlan.topology.edges.map((e, i) => {
+            const a = floorPlan.rooms.find(r => r.id === e.parentId);
+            const b = floorPlan.rooms.find(r => r.id === e.childId);
+            if (!a || !b) return null;
+            const hasDoor = floorPlan.doors.some(
+              d =>
+                (d.roomAId === e.parentId && d.roomBId === e.childId) ||
+                (d.roomAId === e.childId && d.roomBId === e.parentId),
+            );
+            return (
+              <line
+                key={`topo-${i}`}
+                x1={tx(a.x + a.w / 2)}
+                y1={ty(a.y + a.h / 2)}
+                x2={tx(b.x + b.w / 2)}
+                y2={ty(b.y + b.h / 2)}
+                stroke={hasDoor ? '#22c55e' : '#ef4444'}
+                strokeWidth={hasDoor ? 1 : 2}
+                strokeDasharray={hasDoor ? '2 4' : '6 3'}
+                opacity="0.7"
+              />
+            );
+          })}
+          {/* Shared walls */}
+          {floorPlan.sharedWalls.map((w, i) => (
+            <line
+              key={`sw-${i}`}
+              x1={tx(w.start.x)}
+              y1={ty(w.start.y)}
+              x2={tx(w.end.x)}
+              y2={ty(w.end.y)}
+              stroke="#f59e0b"
+              strokeWidth="3"
+              opacity="0.5"
+            />
+          ))}
+          {/* Corridor centreline */}
+          {floorPlan.spine.centreline.length >= 2 && (
+            <path
+              d={floorPlan.spine.centreline
+                .map((p, i) => `${i === 0 ? 'M' : 'L'} ${tx(p.x)} ${ty(p.y)}`)
+                .join(' ')}
+              fill="none"
+              stroke="#a78bfa"
+              strokeWidth="2"
+              strokeDasharray="8 4"
+            />
+          )}
+          {/* Validation errors badge */}
+          {!floorPlan.validation.valid && (
+            <text x={padding} y={24} fill="#ef4444" style={{ fontSize: '11px', fontWeight: 700 }}>
+              INVALID: {floorPlan.validation.errors.length} errors
+            </text>
+          )}
+        </g>
+      )}
+
+      {/* Compass */}
       <g>
-        {/* Background circle */}
         <circle cx={compassCx} cy={compassCy} r={compassR + 6} fill="rgba(15, 23, 42, 0.85)" stroke="rgba(255,255,255,0.08)" strokeWidth="1" />
         <circle cx={compassCx} cy={compassCy} r={compassR} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
-        
-        {/* Cross lines */}
-        <line x1={compassCx} y1={compassCy - compassR + 4} x2={compassCx} y2={compassCy + compassR - 4} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
-        <line x1={compassCx - compassR + 4} y1={compassCy} x2={compassCx + compassR - 4} y2={compassCy} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
-
-        {/* N */}
-        <text x={compassCx} y={compassCy - compassR + 1} textAnchor="middle" 
-          fill={entranceDirection === 'N' ? '#a78bfa' : '#64748b'} 
-          style={{ fontSize: entranceDirection === 'N' ? '11px' : '9px', fontWeight: entranceDirection === 'N' ? 800 : 500 }}>
-          N
-        </text>
-        {entranceDirection === 'N' && <circle cx={compassCx} cy={compassCy - compassR + 6} r="2" fill="#8b5cf6" />}
-
-        {/* S */}
-        <text x={compassCx} y={compassCy + compassR + 1} textAnchor="middle" 
-          fill={entranceDirection === 'S' ? '#a78bfa' : '#64748b'} 
-          style={{ fontSize: entranceDirection === 'S' ? '11px' : '9px', fontWeight: entranceDirection === 'S' ? 800 : 500 }}>
-          S
-        </text>
-        {entranceDirection === 'S' && <circle cx={compassCx} cy={compassCy + compassR - 4} r="2" fill="#8b5cf6" />}
-
-        {/* E */}
-        <text x={compassCx + compassR + 1} y={compassCy + 3} textAnchor="middle" 
-          fill={entranceDirection === 'E' ? '#a78bfa' : '#64748b'} 
-          style={{ fontSize: entranceDirection === 'E' ? '11px' : '9px', fontWeight: entranceDirection === 'E' ? 800 : 500 }}>
-          E
-        </text>
-        {entranceDirection === 'E' && <circle cx={compassCx + compassR - 4} cy={compassCy} r="2" fill="#8b5cf6" />}
-
-        {/* W */}
-        <text x={compassCx - compassR - 1} y={compassCy + 3} textAnchor="middle" 
-          fill={entranceDirection === 'W' ? '#a78bfa' : '#64748b'} 
-          style={{ fontSize: entranceDirection === 'W' ? '11px' : '9px', fontWeight: entranceDirection === 'W' ? 800 : 500 }}>
-          W
-        </text>
-        {entranceDirection === 'W' && <circle cx={compassCx - compassR + 4} cy={compassCy} r="2" fill="#8b5cf6" />}
-
-        {/* North arrow */}
-        <polygon 
+        <text x={compassCx} y={compassCy - compassR + 1} textAnchor="middle"
+          fill={entranceDirection === 'N' ? '#a78bfa' : '#64748b'}
+          style={{ fontSize: entranceDirection === 'N' ? '11px' : '9px', fontWeight: entranceDirection === 'N' ? 800 : 500 }}>N</text>
+        <text x={compassCx} y={compassCy + compassR + 1} textAnchor="middle"
+          fill={entranceDirection === 'S' ? '#a78bfa' : '#64748b'}
+          style={{ fontSize: entranceDirection === 'S' ? '11px' : '9px', fontWeight: entranceDirection === 'S' ? 800 : 500 }}>S</text>
+        <text x={compassCx + compassR + 1} y={compassCy + 3} textAnchor="middle"
+          fill={entranceDirection === 'E' ? '#a78bfa' : '#64748b'}
+          style={{ fontSize: entranceDirection === 'E' ? '11px' : '9px', fontWeight: entranceDirection === 'E' ? 800 : 500 }}>E</text>
+        <text x={compassCx - compassR - 1} y={compassCy + 3} textAnchor="middle"
+          fill={entranceDirection === 'W' ? '#a78bfa' : '#64748b'}
+          style={{ fontSize: entranceDirection === 'W' ? '11px' : '9px', fontWeight: entranceDirection === 'W' ? 800 : 500 }}>W</text>
+        <polygon
           points={`${compassCx},${compassCy - 14} ${compassCx - 4},${compassCy - 6} ${compassCx + 4},${compassCy - 6}`}
           fill={entranceDirection === 'N' ? '#8b5cf6' : '#ef4444'}
           opacity="0.8"
         />
-        {/* Center dot */}
         <circle cx={compassCx} cy={compassCy} r="2.5" fill="#ef4444" />
       </g>
     </svg>
   );
 };
+
+function swingArcPath(
+  px: number,
+  py: number,
+  r: number,
+  orientation: 'horizontal' | 'vertical',
+  entrance: boolean,
+): string {
+  const start = orientation === 'horizontal' ? 0 : Math.PI / 2;
+  const sweep = entrance ? -Math.PI / 2 : Math.PI / 2;
+  const a1 = start;
+  const a2 = start + sweep;
+  const x1 = px + r * Math.cos(a1);
+  const y1 = py + r * Math.sin(a1);
+  const x2 = px + r * Math.cos(a2);
+  const y2 = py + r * Math.sin(a2);
+  const large = 0;
+  const sweepFlag = sweep > 0 ? 1 : 0;
+  return `M ${px} ${py} L ${x1} ${y1} A ${r} ${r} 0 ${large} ${sweepFlag} ${x2} ${y2} Z`;
+}

@@ -1,13 +1,15 @@
 import React, { useState, useMemo } from 'react';
-import { Layers, Zap, Download, ChevronRight, ChevronLeft, Trophy, Activity, GitCommit, Home, Settings, Box } from 'lucide-react';
+import { Layers, Zap, Download, ChevronRight, ChevronLeft, Trophy, Activity, GitCommit, Home, Settings, Box, Bug } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlanViewer2D } from './components/PlanViewer2D';
 import { MassingViewer3D } from './components/MassingViewer3D';
-import { buildFromSpec, geneCount, type EntranceDirection } from './planner/ProgramBuilder';
-import { ConstraintSolver } from './solver/ConstraintSolver';
-import { NSGA2, type Evaluator, type Individual } from './optimizer/NSGA2';
-import { scoreObjectives, computeRoomIntegration } from './optimizer/objectives';
-import type { ProgramSpec, RoomType } from './types/index';
+import { type EntranceDirection } from './planner/ProgramBuilder';
+import { generateFloorPlanOptions, floorPlanToSolveProblem } from './planner/ProgramBuilder';
+import { buildFromSpecTopologyFirst } from './planner/generateFloorPlan';
+import { flowInfoFromPlan } from './optimizer/objectives';
+import type { FloorPlan } from './planner/types';
+import { compareLexico, lexicoScores } from './planner/optimize/validPlanOptimizer';
+import type { ProgramSpec } from './types/index';
 
 // ─── BHK Presets ────────────────────────────────────────────────────────────
 type BHKType = '1 BHK' | '2 BHK' | '3 BHK' | '4 BHK';
@@ -104,11 +106,24 @@ const ROOM_COLORS: Record<string, { bg: string; border: string; label: string }>
   kitchen:  { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981', label: '#34d399' },
   bedroom:  { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6', label: '#60a5fa' },
   bathroom: { bg: 'rgba(6, 182, 212, 0.12)',  border: '#06b6d4', label: '#22d3ee' },
+  ensuite:  { bg: 'rgba(6, 182, 212, 0.18)',  border: '#0891b2', label: '#22d3ee' },
   corridor: { bg: 'rgba(100, 116, 139, 0.08)', border: '#64748b', label: '#94a3b8' },
   entry:    { bg: 'rgba(139, 92, 246, 0.12)', border: '#8b5cf6', label: '#a78bfa' },
+  foyer:    { bg: 'rgba(139, 92, 246, 0.08)', border: '#a78bfa', label: '#c4b5fd' },
+  utility:  { bg: 'rgba(161, 161, 170, 0.10)', border: '#a1a1aa', label: '#d4d4d8' },
+  balcony:  { bg: 'rgba(52, 211, 153, 0.10)', border: '#34d399', label: '#6ee7b7' },
   storage:  { bg: 'rgba(161, 161, 170, 0.10)', border: '#a1a1aa', label: '#d4d4d8' },
   office:   { bg: 'rgba(236, 72, 153, 0.12)', border: '#ec4899', label: '#f472b6' },
 };
+
+function isDebugEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (new URLSearchParams(window.location.search).has('debug')) return true;
+  // Vite sets MODE in import.meta; fall back to localhost heuristic
+  const meta = import.meta as ImportMeta & { env?: { DEV?: boolean; MODE?: string } };
+  if (meta.env?.DEV || meta.env?.MODE === 'development') return true;
+  return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+}
 
 // ─── Direction labels for compass ───────────────────────────────────────────
 const DIRECTION_LABELS: Record<EntranceDirection, string> = {
@@ -125,54 +140,50 @@ const App: React.FC = () => {
   const [entranceDir, setEntranceDir] = useState<EntranceDirection>('S');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showGraphOverlay, setShowGraphOverlay] = useState(false);
-  const [candidates, setCandidates] = useState<Individual[]>([]);
+  const [showDebugOverlay, setShowDebugOverlay] = useState(false);
+  const [candidates, setCandidates] = useState<FloorPlan[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isSolving, setIsSolving] = useState(false);
-  const [telemetry, setTelemetry] = useState<string[]>(['[system] architectural core ready']);
+  const [telemetry, setTelemetry] = useState<string[]>(['[system] topology-first generator ready']);
+  const debugEnabled = isDebugEnabled();
 
-  // Derive spec from BHK preset + carpet area
+  // Derive spec from BHK preset + carpet area (budgets normalised inside generator)
   const spec = useMemo<ProgramSpec>(() => {
     const preset = BHK_PRESETS[bhkType];
-    const defaultTotal = preset.rooms.reduce((s, r) => s + r.count * r.targetArea, 0);
-    const scale = carpetArea / defaultTotal;
-    
     return {
       totalAreaTarget: carpetArea,
-      rooms: preset.rooms.map(r => ({
-        ...r,
-        targetArea: Math.round(r.targetArea * scale * 10) / 10,
-      })),
+      rooms: preset.rooms.map(r => ({ ...r })),
       adjacencies: preset.adjacencies,
     };
   }, [bhkType, carpetArea]);
 
-  // Compute outline dimensions from carpet area (roughly square-ish)
   const { outlineW, outlineH } = useMemo(() => {
-    const aspect = 1.3; // slightly rectangular
+    const aspect = 1.3;
     const h = Math.sqrt(carpetArea / aspect);
     const w = carpetArea / h;
     return { outlineW: Math.round(w * 10) / 10, outlineH: Math.round(h * 10) / 10 };
   }, [carpetArea]);
 
-  const roomCount = useMemo(() => spec.rooms.reduce((s, r) => s + r.count, 0), [spec]);
-  const genes = useMemo(() => geneCount(roomCount), [roomCount]);
+  const defaultPlan = useMemo(() => {
+    const { plan } = buildFromSpecTopologyFirst(spec, outlineW, outlineH, entranceDir, 42);
+    return plan;
+  }, [spec, outlineW, outlineH, entranceDir]);
+
+  const activePlan = candidates.length > 0
+    ? candidates[Math.min(selectedIndex, candidates.length - 1)]
+    : defaultPlan;
 
   const activeGraph = useMemo(() => {
-    if (candidates.length > 0) {
-      const ind = candidates[selectedIndex];
-      const problem = buildFromSpec(spec, outlineW, outlineH, ind.genome, entranceDir);
-      new ConstraintSolver(problem).solve();
-      return problem.graph;
+    if (!activePlan) {
+      return { vertices: new Map(), edges: new Map(), faces: new Map() };
     }
-    // Default layout
-    const problem = buildFromSpec(spec, outlineW, outlineH, Array(genes).fill(0.5), entranceDir);
-    new ConstraintSolver(problem).solve();
-    return problem.graph;
-  }, [candidates, selectedIndex, spec, outlineW, outlineH, genes, entranceDir]);
+    return floorPlanToSolveProblem(activePlan).graph;
+  }, [activePlan]);
 
   const activeFlowData = useMemo(() => {
-    return computeRoomIntegration(activeGraph);
-  }, [activeGraph]);
+    if (!activePlan) return null;
+    return flowInfoFromPlan(activePlan);
+  }, [activePlan]);
 
   const handleBHKChange = (type: BHKType) => {
     setBhkType(type);
@@ -183,105 +194,70 @@ const App: React.FC = () => {
 
   const handleGenerativeRun = () => {
     setIsSolving(true);
-    setTelemetry(prev => [...prev, `[nsga] evolving ${bhkType} layouts...`]);
-    
+    setTelemetry(prev => [...prev, `[topo] generating ${bhkType} layouts (40 seeds)...`]);
+
     setTimeout(() => {
-      const outline = [
-        { x: 0, y: 0 }, { x: outlineW, y: 0 },
-        { x: outlineW, y: outlineH }, { x: 0, y: outlineH },
-      ];
-
-      const evaluator: Evaluator = {
-        geneCount: genes,
-        evaluate: (genome) => {
-          const problem = buildFromSpec(spec, outlineW, outlineH, genome, entranceDir);
-          new ConstraintSolver(problem).solve();
-          return scoreObjectives(problem.graph, outline);
-        }
-      };
-
-      const nsga = new NSGA2(evaluator, { 
-        populationSize: 40, 
-        generations: 20, 
-        crossoverProb: 0.9, 
-        mutationProb: 0.2, 
-        etaC: 15, 
-        etaM: 20, 
-        seed: Date.now() 
-      });
-      
-      const front = nsga.run((gen) => {
-        if (gen % 5 === 0) setTelemetry(prev => [...prev.slice(-5), `[nsga] generation ${gen} evolved`]);
+      const result = generateFloorPlanOptions(spec, outlineW, outlineH, entranceDir, {
+        seeds: 40,
+        retain: 6,
+        baseSeed: Date.now() % 100000,
+        optimizeIterations: 50,
       });
 
-      setCandidates(front);
-      setSelectedIndex(0);
+      if (result.infeasible && result.plans.length === 0) {
+        setCandidates([]);
+        setTelemetry(prev => [...prev, `[error] ${result.infeasible}`]);
+      } else {
+        setCandidates(result.plans);
+        setSelectedIndex(0);
+        setTelemetry(prev => [
+          ...prev,
+          `[topo] ${result.validCount} valid / ${result.attempts} seeds → ${result.plans.length} options`,
+        ]);
+      }
       setIsSolving(false);
-      setTelemetry(prev => [...prev, `[nsga] pareto front: ${front.length} options`]);
-    }, 100);
+    }, 50);
   };
 
   const handleSelectBest = () => {
-    const outline = [
-      { x: 0, y: 0 }, { x: outlineW, y: 0 },
-      { x: outlineW, y: outlineH }, { x: 0, y: outlineH },
-    ];
-
     if (candidates.length === 0) {
       setIsSolving(true);
-      setTelemetry(prev => [...prev, '[ai] auto-generating + selecting best layout...']);
-      
+      setTelemetry(prev => [...prev, '[ai] generating + selecting best valid layout...']);
       setTimeout(() => {
-        const evaluator: Evaluator = {
-          geneCount: genes,
-          evaluate: (genome) => {
-            const problem = buildFromSpec(spec, outlineW, outlineH, genome, entranceDir);
-            new ConstraintSolver(problem).solve();
-            return scoreObjectives(problem.graph, outline);
-          }
-        };
-
-        const nsga = new NSGA2(evaluator, { 
-          populationSize: 40, 
-          generations: 20, 
-          crossoverProb: 0.9, 
-          mutationProb: 0.2, 
-          etaC: 15, 
-          etaM: 20, 
-          seed: Date.now() 
+        const result = generateFloorPlanOptions(spec, outlineW, outlineH, entranceDir, {
+          seeds: 40,
+          retain: 6,
+          baseSeed: Date.now() % 100000,
+          optimizeIterations: 50,
         });
-        
-        const front = nsga.run();
-        setCandidates(front);
-        selectBestFromPop(front, outline);
+        if (result.plans.length === 0) {
+          setTelemetry(prev => [...prev, `[error] ${result.infeasible ?? 'no valid plans'}`]);
+          setIsSolving(false);
+          return;
+        }
+        setCandidates(result.plans);
+        selectBestFromPop(result.plans);
         setIsSolving(false);
-      }, 100);
+      }, 50);
     } else {
-      selectBestFromPop(candidates, outline);
+      selectBestFromPop(candidates);
     }
   };
 
-  const selectBestFromPop = (pop: Individual[], outline: { x: number, y: number }[]) => {
+  const selectBestFromPop = (pop: FloorPlan[]) => {
     let bestIndex = 0;
-    let minScore = Infinity;
-
-    pop.forEach((ind, index) => {
-      const problem = buildFromSpec(spec, outlineW, outlineH, ind.genome, entranceDir);
-      new ConstraintSolver(problem).solve();
-      const objectives = scoreObjectives(problem.graph, outline);
-      const flowInfo = computeRoomIntegration(problem.graph);
-
-      const score = (objectives.areaError * 100) + (objectives.circulation * 10) + ((1 - objectives.daylight) * 30) + (flowInfo.flowScore * 10);
-      if (score < minScore) {
-        minScore = score;
+    let bestLex = pop[0] ? (pop[0].scores?.lexico ?? lexicoScores(pop[0])) : [Infinity];
+    pop.forEach((plan, index) => {
+      const lex = plan.scores?.lexico ?? lexicoScores(plan);
+      if (compareLexico(lex, bestLex) < 0) {
+        bestLex = lex;
         bestIndex = index;
       }
     });
-
     setSelectedIndex(bestIndex);
     setTelemetry(prev => [
       ...prev,
-      `[ai] selected Option ${bestIndex + 1} — best graph flow (score: ${minScore.toFixed(1)})`
+      `[ai] selected Option ${bestIndex + 1} — lexico areaErr=${bestLex[0]?.toFixed(3) ?? '?'}`,
     ]);
   };
 
@@ -484,7 +460,12 @@ const App: React.FC = () => {
                       <span style={{ fontWeight: 600, color: selectedIndex === i ? '#818cf8' : '#e2e8f0' }}>Option {i+1}</span>
                       {i === 0 && <Trophy size={10} color="#fbbf24" />}
                     </div>
-                    <p style={{ color: '#94a3b8' }}>Daylight: {((1 - c.objectives[2]) * 100).toFixed(0)}%</p>
+                    <p style={{ color: '#94a3b8' }}>
+                      {c.validation.valid ? 'Valid' : 'Invalid'} · doors {c.doors.length}
+                    </p>
+                    <p style={{ color: '#64748b' }}>
+                      Area err: {((c.scores?.areaError ?? 0) * 100).toFixed(0)}%
+                    </p>
                   </div>
                 ))}
               </div>
@@ -619,6 +600,28 @@ const App: React.FC = () => {
             <GitCommit size={16} />
             Graph
           </button>
+          {debugEnabled && (
+            <button
+              onClick={() => setShowDebugOverlay(o => !o)}
+              style={{
+                background: showDebugOverlay ? 'rgba(245, 158, 11, 0.15)' : 'rgba(25, 25, 30, 0.8)',
+                color: showDebugOverlay ? '#f59e0b' : '#94a3b8',
+                border: showDebugOverlay ? '1px solid rgba(245, 158, 11, 0.5)' : '1px solid rgba(255,255,255,0.08)',
+                padding: '8px 16px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '0.8rem',
+                fontWeight: 500,
+                backdropFilter: 'blur(12px)',
+              }}
+            >
+              <Bug size={16} />
+              Dev Debug
+            </button>
+          )}
         </div>
 
         <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -633,6 +636,8 @@ const App: React.FC = () => {
                   flowData={activeFlowData}
                   entranceDirection={entranceDir}
                   roomColors={ROOM_COLORS}
+                  floorPlan={activePlan}
+                  showDebugOverlay={showDebugOverlay && debugEnabled}
                 />
               ) : (
                 <MassingViewer3D graph={activeGraph} />

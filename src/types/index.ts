@@ -43,8 +43,12 @@ export type RoomType =
   | 'kitchen'
   | 'bedroom'
   | 'bathroom'
+  | 'ensuite'
   | 'corridor'
   | 'entry'
+  | 'foyer'
+  | 'utility'
+  | 'balcony'
   | 'storage'
   | 'office';
 
