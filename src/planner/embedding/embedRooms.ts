@@ -11,6 +11,18 @@ import type {
 import { categoryToLiveType } from '../types.ts';
 import { RNG } from '../rng.ts';
 
+/**
+ * Layout styles = parametric presets. All keep corridor-touching rooms
+ * so topology doors remain placeable.
+ */
+export type LayoutStyle =
+  | 'classic'
+  | 'offset'
+  | 'livingFront'
+  | 'wetCluster'
+  | 'splitWings'
+  | 'gallery';
+
 export interface EmbedInput {
   tree: AccessTree;
   budgets: AreaBudget[];
@@ -22,6 +34,7 @@ export interface EmbedInput {
   outlineH: number;
   entranceDir: EntranceDirection;
   seed: number;
+  layoutStyle?: LayoutStyle;
 }
 
 interface Rect {
@@ -31,21 +44,111 @@ interface Rect {
   h: number;
 }
 
-/**
- * Strict axis-aligned tiling around a corridor spine.
- * Guarantees non-overlap and corridor contact for private/public zones.
- */
-export function embedRooms(input: EmbedInput): RoomRect[] {
-  const { entranceDir } = input;
-  if (entranceDir === 'E' || entranceDir === 'W') {
-    return embedEW(input);
-  }
-  return embedNS(input);
+type Item = { id: string; cat: AccessNodeCategory; weight: number; ensuiteId?: string };
+
+interface LayoutParams {
+  /** Corridor lateral bias along the long axis of the building. */
+  corrBias: 'farLeft' | 'left' | 'center' | 'right' | 'farRight';
+  /** Kitchen placement relative to living. */
+  kitchenMode: 'stripEntrance' | 'stripDeep' | 'sideCorridor' | 'sideOuter';
+  /** Where common baths sit in the private stack. */
+  bathOrder: 'entrance' | 'deep' | 'middle' | 'interleave';
+  /** Put one bedroom on the public wing (guest suite). */
+  guestWing: boolean;
+  /** Cluster common baths next to kitchen on the public wing. */
+  wetOnPublic: boolean;
+  /** Absorb entrance pocket into living when kitchen is deep. */
+  livingPocket: boolean;
 }
 
-function embedNS(input: EmbedInput): RoomRect[] {
+const STYLES: LayoutStyle[] = [
+  'classic',
+  'offset',
+  'livingFront',
+  'wetCluster',
+  'splitWings',
+  'gallery',
+];
+
+export function pickLayoutStyle(seed: number, variant = 0): LayoutStyle {
+  const rng = new RNG(seed ^ (variant * 7919));
+  return rng.pick(STYLES);
+}
+
+function paramsForStyle(style: LayoutStyle, rng: RNG): LayoutParams {
+  switch (style) {
+    case 'offset':
+      return {
+        corrBias: rng.bool() ? 'farLeft' : 'farRight',
+        kitchenMode: rng.pick(['stripDeep', 'stripEntrance', 'sideCorridor'] as const),
+        bathOrder: rng.pick(['deep', 'entrance', 'interleave'] as const),
+        guestWing: false,
+        wetOnPublic: false,
+        livingPocket: true,
+      };
+    case 'livingFront':
+      return {
+        corrBias: rng.pick(['left', 'center', 'right'] as const),
+        kitchenMode: rng.pick(['stripEntrance', 'sideOuter'] as const),
+        bathOrder: rng.pick(['deep', 'middle'] as const),
+        guestWing: false,
+        wetOnPublic: false,
+        livingPocket: false,
+      };
+    case 'wetCluster':
+      return {
+        // Bias corridor so public wing is wide enough for wet stack + living
+        corrBias: rng.bool() ? 'farLeft' : 'farRight',
+        kitchenMode: 'stripDeep',
+        bathOrder: 'deep',
+        guestWing: false,
+        wetOnPublic: true,
+        livingPocket: true,
+      };
+    case 'splitWings':
+      return {
+        // Asymmetric: small private wing + wide public wing with guest bedroom
+        corrBias: rng.bool() ? 'farLeft' : 'farRight',
+        kitchenMode: rng.pick(['sideCorridor', 'stripDeep'] as const),
+        bathOrder: 'deep',
+        guestWing: true,
+        wetOnPublic: false,
+        livingPocket: true,
+      };
+    case 'gallery':
+      return {
+        corrBias: rng.pick(['left', 'right'] as const),
+        kitchenMode: rng.pick(['sideCorridor', 'sideOuter'] as const),
+        bathOrder: rng.pick(['interleave', 'middle'] as const),
+        guestWing: false,
+        wetOnPublic: false,
+        livingPocket: true,
+      };
+    case 'classic':
+    default:
+      return {
+        corrBias: rng.pick(['left', 'center', 'right'] as const),
+        kitchenMode: rng.pick(['stripDeep', 'stripEntrance'] as const),
+        bathOrder: rng.pick(['deep', 'entrance', 'interleave'] as const),
+        guestWing: false,
+        wetOnPublic: false,
+        livingPocket: true,
+      };
+  }
+}
+
+export function embedRooms(input: EmbedInput): RoomRect[] {
+  const style = input.layoutStyle ?? pickLayoutStyle(input.seed);
+  if (input.entranceDir === 'E' || input.entranceDir === 'W') {
+    return embedEW(input, style);
+  }
+  return embedNS(input, style);
+}
+
+function embedNS(input: EmbedInput, style: LayoutStyle): RoomRect[] {
   const { tree, budgets, outlineW: W, outlineH: H, entranceDir, seed } = input;
   const rng = new RNG(seed);
+  const params = paramsForStyle(style, rng);
   const fromS = entranceDir === 'S';
   const rooms: RoomRect[] = [];
 
@@ -59,29 +162,358 @@ function embedNS(input: EmbedInput): RoomRect[] {
   const ensuites = all(tree, 'ENSUITE_BATHROOM');
   const utility = optional(tree, 'UTILITY');
 
-  const corrW = 1.05;
-  const entryB = budgetFor(budgets, entry.id);
-  // Keep circulation pocket shallow so side rooms retain height for min areas
-  const entryDepth = clamp(Math.max(entryB.minArea / corrW, 1.45), 1.45, 1.7);
+  const corrW = rng.bool(0.4) ? 1.15 : 1.05;
+  const entryDepth = clamp(Math.max(budgetFor(budgets, entry.id).minArea / corrW, 1.45), 1.45, 1.75);
   const foyerDepth = foyer
-    ? clamp(Math.max(budgetFor(budgets, foyer.id).minArea / corrW, 1.45), 1.45, 1.6)
+    ? clamp(Math.max(budgetFor(budgets, foyer.id).minArea / corrW, 1.45), 1.45, 1.65)
     : 0;
   const circDepth = entryDepth + foyerDepth;
 
-  // Leave a wide private band (≥3.5m). On narrow outlines, pin corridor off-centre.
-  const minBand = Math.min(3.8, (W - corrW) * 0.55);
-  const corrX = clamp(
-    W * (0.45 + (rng.next() - 0.5) * 0.08),
-    minBand,
-    W - corrW - minBand,
-  );
-
-  // Corridor in centre column, stopping at foyer/entry pocket
+  const minBand = Math.min(3.4, (W - corrW) * 0.42);
+  const corrFrac = biasToFrac(params.corrBias, rng);
+  const corrX = clamp(W * corrFrac, minBand, W - corrW - minBand);
   const corrY = fromS ? 0 : circDepth;
   const corrH = H - circDepth;
-  rooms.push(rectRoom(corr.id, 'CORRIDOR', { x: corrX, y: corrY, w: corrW, h: corrH }, budgets, true));
 
-  // Entry / foyer only in corridor column — side zones use full height
+  rooms.push(rectRoom(corr.id, 'CORRIDOR', { x: corrX, y: corrY, w: corrW, h: corrH }, budgets, true));
+  placeEntryFoyerNS(rooms, entry, foyer, budgets, corrX, corrW, entryDepth, foyerDepth, circDepth, H, fromS);
+
+  const left: Rect = { x: 0, y: corrY, w: corrX, h: corrH };
+  const right: Rect = { x: corrX + corrW, y: corrY, w: W - corrX - corrW, h: corrH };
+
+  // Default: private (bedrooms) on the larger wing.
+  // Guest-wing styles invert this so the public wing is wide enough for living + a bedroom.
+  let privateOnLeft: boolean;
+  if (params.guestWing) {
+    privateOnLeft = left.w <= right.w; // private on smaller → public on larger
+  } else if (params.corrBias === 'farLeft' || params.corrBias === 'left') {
+    privateOnLeft = false;
+  } else if (params.corrBias === 'farRight' || params.corrBias === 'right') {
+    privateOnLeft = true;
+  } else if (left.w < right.w) {
+    privateOnLeft = true;
+  } else if (left.w > right.w) {
+    privateOnLeft = false;
+  } else {
+    privateOnLeft = rng.bool();
+  }
+
+  let bedItems = bedrooms.map(bed => {
+    const en = ensuites.find(e => e.attachedTo === bed.id);
+    return {
+      id: bed.id,
+      cat: 'BEDROOM' as AccessNodeCategory,
+      weight: budgetFor(budgets, bed.id).targetArea + (en ? budgetFor(budgets, en.id).targetArea : 0),
+      ensuiteId: en?.id,
+    };
+  });
+  let bathItems = commonBaths.map(bath => ({
+    id: bath.id,
+    cat: 'COMMON_BATHROOM' as AccessNodeCategory,
+    weight: Math.max(budgetFor(budgets, bath.id).targetArea, 3.5),
+  }));
+  if (rng.bool(0.75)) bedItems = rng.shuffle(bedItems);
+  if (rng.bool(0.5)) bathItems = rng.shuffle(bathItems);
+
+  let privateZone = privateOnLeft ? left : right;
+  let publicZone = privateOnLeft ? right : left;
+
+  // Guest wing: ensuite bedroom on public wing (height-stacked so both touch corridor)
+  const livingMin = Math.max(budgetFor(budgets, living.id).minHeight, 3.0);
+  let guestItem: Item | null = null;
+  const canGuest =
+    params.guestWing &&
+    bedItems.length >= 2 &&
+    publicZone.w >= 3.2 &&
+    publicZone.h >= livingMin + 2.7;
+  if (canGuest) {
+    const ensuiteBed = bedItems.find(b => b.ensuiteId);
+    guestItem = ensuiteBed ?? bedItems[bedItems.length - 1];
+    bedItems = bedItems.filter(b => b !== guestItem);
+  } else if (params.guestWing && left.w !== right.w) {
+    // Fallback: keep all beds on the larger wing (no guest split)
+    privateOnLeft = left.w > right.w;
+    privateZone = privateOnLeft ? left : right;
+    publicZone = privateOnLeft ? right : left;
+  }
+
+  // Wet cluster only when public height can fit bath + kitchen mins + living min
+  const kitMinH = Math.max(budgetFor(budgets, kitchen.id).minHeight, 2.1);
+  const wetNeed = bathItems.length * 1.55 + kitMinH + livingMin;
+  const wetOnPublic =
+    params.wetOnPublic && bathItems.length > 0 && publicZone.h + (params.livingPocket ? circDepth : 0) >= wetNeed + 0.2;
+  const privateBaths = wetOnPublic ? [] : bathItems;
+  const publicBaths = wetOnPublic ? bathItems : [];
+
+  const privateItems = orderPrivateStack(bedItems, privateBaths, params.bathOrder, rng);
+  stackVertical(privateZone, privateItems, budgets, rooms, !privateOnLeft, rng);
+
+  packPublicNS({
+    rooms,
+    publicZone,
+    budgets,
+    living,
+    kitchen,
+    utility,
+    fromS,
+    H,
+    circDepth,
+    kitchenMode: params.kitchenMode,
+    livingPocket: params.livingPocket,
+    guestItem,
+    publicBaths,
+    privateOnLeft,
+    rng,
+  });
+
+  return rooms;
+}
+
+function packPublicNS(opts: {
+  rooms: RoomRect[];
+  publicZone: Rect;
+  budgets: AreaBudget[];
+  living: { id: string };
+  kitchen: { id: string };
+  utility?: { id: string };
+  fromS: boolean;
+  H: number;
+  circDepth: number;
+  kitchenMode: LayoutParams['kitchenMode'];
+  livingPocket: boolean;
+  guestItem: Item | null;
+  publicBaths: Item[];
+  privateOnLeft: boolean;
+  rng: RNG;
+}): void {
+  const {
+    rooms, publicZone, budgets, living, kitchen, utility, fromS, H, circDepth,
+    livingPocket, guestItem, publicBaths, privateOnLeft, rng,
+  } = opts;
+  let kitchenMode = opts.kitchenMode;
+
+  let zone = { ...publicZone };
+  const livingMin = Math.max(budgetFor(budgets, living.id).minHeight, 3.0);
+
+  // Guest bedroom at deep end (full width → touches corridor); living keeps entrance half
+  if (guestItem) {
+    const guestH = clamp(zone.h * 0.4, 2.7, zone.h - livingMin);
+    const guestRect: Rect = fromS
+      ? { x: zone.x, y: zone.y, w: zone.w, h: guestH }
+      : { x: zone.x, y: zone.y + zone.h - guestH, w: zone.w, h: guestH };
+    stackVertical(guestRect, [guestItem], budgets, rooms, privateOnLeft, rng);
+    zone = fromS
+      ? { x: zone.x, y: zone.y + guestH, w: zone.w, h: zone.h - guestH }
+      : { x: zone.x, y: zone.y, w: zone.w, h: zone.h - guestH };
+    // Remaining band is short — force side-by-side kitchen so living keeps height
+    if (zone.h < livingMin + 2.2) {
+      kitchenMode = zone.w >= 5.0 ? 'sideCorridor' : kitchenMode;
+    }
+  }
+
+  // Wet cluster: common baths + kitchen stacked at deep end along corridor
+  if (publicBaths.length > 0) {
+    const kitB = budgetFor(budgets, kitchen.id);
+    const bathMin = publicBaths.length * 1.55;
+    const kitMin = Math.max(kitB.minHeight, 2.1);
+    const pocketBonus = livingPocket ? circDepth : 0;
+    const maxWet = zone.h + pocketBonus - livingMin;
+    const wetH = clamp(bathMin + kitMin, bathMin + kitMin, Math.min(zone.h * 0.55, maxWet));
+    const wetZone: Rect = fromS
+      ? { x: zone.x, y: zone.y, w: zone.w, h: wetH }
+      : { x: zone.x, y: zone.y + zone.h - wetH, w: zone.w, h: wetH };
+
+    const bathH = Math.min(bathMin, wetH - kitMin);
+    const kitH = wetH - bathH;
+    const bathZone: Rect = fromS
+      ? { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: bathH }
+      : { x: wetZone.x, y: wetZone.y + wetZone.h - bathH, w: wetZone.w, h: bathH };
+    const kitZone: Rect = fromS
+      ? { x: wetZone.x, y: wetZone.y + bathH, w: wetZone.w, h: kitH }
+      : { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: kitH };
+
+    stackVertical(bathZone, publicBaths, budgets, rooms, privateOnLeft, rng);
+    placeKitchenInRect(rooms, kitchen.id, utility, kitZone, budgets, fromS, rng);
+    zone = fromS
+      ? { x: zone.x, y: zone.y + wetH, w: zone.w, h: zone.h - wetH }
+      : { x: zone.x, y: zone.y, w: zone.w, h: zone.h - wetH };
+
+    pushLiving(rooms, living.id, zone, budgets, fromS, H, circDepth, livingPocket);
+    return;
+  }
+
+  const kitB = budgetFor(budgets, kitchen.id);
+  const livB = budgetFor(budgets, living.id);
+  // Side-by-side: living MUST stay against the corridor for topology doors
+  const wantSide =
+    (kitchenMode === 'sideCorridor' || kitchenMode === 'sideOuter') && zone.w >= 5.2;
+
+  if (wantSide) {
+    const kitW = clamp(
+      zone.w * (kitB.targetArea / (kitB.targetArea + livB.targetArea)),
+      Math.max(kitB.minWidth, 2.1),
+      zone.w * 0.4,
+    );
+    const corrOnRight = !privateOnLeft;
+    // Kitchen on outer wall; living against corridor
+    const kitX = corrOnRight ? zone.x : zone.x + zone.w - kitW;
+    const kitRect: Rect = { x: kitX, y: zone.y, w: kitW, h: zone.h };
+    const livingRect: Rect = kitX <= zone.x + 0.01
+      ? { x: zone.x + kitW, y: zone.y, w: zone.w - kitW, h: zone.h }
+      : { x: zone.x, y: zone.y, w: zone.w - kitW, h: zone.h };
+
+    placeKitchenInRect(rooms, kitchen.id, utility, kitRect, budgets, fromS, rng);
+    pushLiving(rooms, living.id, livingRect, budgets, fromS, H, circDepth, livingPocket);
+    return;
+  }
+
+  // Horizontal kitchen strip
+  const kitH = clamp(
+    zone.h * (kitB.targetArea / (kitB.targetArea + livB.targetArea)),
+    Math.max(kitB.minHeight, 2.0),
+    zone.h * 0.4,
+  );
+  const atEntrance = kitchenMode === 'stripEntrance';
+  const kitAtDeep = fromS ? !atEntrance : atEntrance;
+  const kitchenRect: Rect = kitAtDeep
+    ? (fromS
+        ? { x: zone.x, y: zone.y, w: zone.w, h: kitH }
+        : { x: zone.x, y: zone.y + zone.h - kitH, w: zone.w, h: kitH })
+    : (fromS
+        ? { x: zone.x, y: zone.y + zone.h - kitH, w: zone.w, h: kitH }
+        : { x: zone.x, y: zone.y, w: zone.w, h: kitH });
+
+  placeKitchenInRect(rooms, kitchen.id, utility, kitchenRect, budgets, fromS, rng);
+
+  const livingRect: Rect = kitAtDeep
+    ? (fromS
+        ? { x: zone.x, y: zone.y + kitH, w: zone.w, h: zone.h - kitH }
+        : { x: zone.x, y: zone.y, w: zone.w, h: zone.h - kitH })
+    : (fromS
+        ? { x: zone.x, y: zone.y, w: zone.w, h: zone.h - kitH }
+        : { x: zone.x, y: zone.y + kitH, w: zone.w, h: zone.h - kitH });
+
+  pushLiving(rooms, living.id, livingRect, budgets, fromS, H, circDepth, livingPocket && kitAtDeep);
+}
+
+function placeKitchenInRect(
+  rooms: RoomRect[],
+  kitchenId: string,
+  utility: { id: string } | undefined,
+  kitZone: Rect,
+  budgets: AreaBudget[],
+  fromS: boolean,
+  rng: RNG,
+): void {
+  if (!utility) {
+    rooms.push(rectRoom(kitchenId, 'KITCHEN', kitZone, budgets));
+    return;
+  }
+  if (kitZone.w >= kitZone.h && kitZone.w >= 3.2) {
+    const uw = clamp(kitZone.w * 0.3, 1.2, kitZone.w * 0.38);
+    const utilRight = rng.bool();
+    rooms.push(rectRoom(kitchenId, 'KITCHEN', {
+      x: utilRight ? kitZone.x : kitZone.x + uw,
+      y: kitZone.y,
+      w: kitZone.w - uw,
+      h: kitZone.h,
+    }, budgets));
+    rooms.push(rectRoom(utility.id, 'UTILITY', {
+      x: utilRight ? kitZone.x + kitZone.w - uw : kitZone.x,
+      y: kitZone.y,
+      w: uw,
+      h: kitZone.h,
+    }, budgets));
+  } else {
+    const uh = clamp(kitZone.h * 0.3, 1.2, kitZone.h * 0.38);
+    rooms.push(rectRoom(utility.id, 'UTILITY', {
+      x: kitZone.x,
+      y: fromS ? kitZone.y + kitZone.h - uh : kitZone.y,
+      w: kitZone.w,
+      h: uh,
+    }, budgets));
+    rooms.push(rectRoom(kitchenId, 'KITCHEN', fromS
+      ? { x: kitZone.x, y: kitZone.y, w: kitZone.w, h: kitZone.h - uh }
+      : { x: kitZone.x, y: kitZone.y + uh, w: kitZone.w, h: kitZone.h - uh }, budgets));
+  }
+}
+
+function pushLiving(
+  rooms: RoomRect[],
+  livingId: string,
+  livingRect: Rect,
+  budgets: AreaBudget[],
+  fromS: boolean,
+  H: number,
+  circDepth: number,
+  absorbPocket: boolean,
+): void {
+  const r = { ...livingRect };
+  if (absorbPocket) {
+    if (fromS) r.h = H - r.y;
+    else {
+      r.y = Math.max(0, r.y - circDepth);
+      r.h += circDepth;
+    }
+  }
+  rooms.push(rectRoom(livingId, 'LIVING', r, budgets));
+}
+
+function orderPrivateStack(
+  bedItems: Item[],
+  bathItems: Item[],
+  order: LayoutParams['bathOrder'],
+  rng: RNG,
+): Item[] {
+  if (bathItems.length === 0) return [...bedItems];
+  if (order === 'entrance') return [...bedItems, ...bathItems];
+  if (order === 'deep') return [...bathItems, ...bedItems];
+  if (order === 'middle' && bedItems.length >= 2) {
+    const mid = Math.floor(bedItems.length / 2);
+    return [...bedItems.slice(0, mid), ...bathItems, ...bedItems.slice(mid)];
+  }
+  // interleave
+  const out: Item[] = [];
+  const beds = [...bedItems];
+  const baths = [...bathItems];
+  if (rng.bool()) {
+    while (beds.length || baths.length) {
+      if (beds.length) out.push(beds.shift()!);
+      if (baths.length) out.push(baths.shift()!);
+    }
+  } else {
+    while (beds.length || baths.length) {
+      if (baths.length) out.push(baths.shift()!);
+      if (beds.length) out.push(beds.shift()!);
+    }
+  }
+  return out;
+}
+
+function biasToFrac(bias: LayoutParams['corrBias'], rng: RNG): number {
+  switch (bias) {
+    case 'farLeft': return 0.26 + rng.next() * 0.06;
+    case 'left': return 0.34 + rng.next() * 0.08;
+    case 'right': return 0.54 + rng.next() * 0.08;
+    case 'farRight': return 0.64 + rng.next() * 0.08;
+    case 'center':
+    default: return 0.42 + rng.next() * 0.16;
+  }
+}
+
+function placeEntryFoyerNS(
+  rooms: RoomRect[],
+  entry: { id: string },
+  foyer: { id: string } | undefined,
+  budgets: AreaBudget[],
+  corrX: number,
+  corrW: number,
+  entryDepth: number,
+  foyerDepth: number,
+  circDepth: number,
+  H: number,
+  fromS: boolean,
+): void {
   if (fromS) {
     if (foyer) {
       rooms.push(rectRoom(foyer.id, 'FOYER', { x: corrX, y: H - circDepth, w: corrW, h: foyerDepth }, budgets));
@@ -93,74 +525,12 @@ function embedNS(input: EmbedInput): RoomRect[] {
       rooms.push(rectRoom(foyer.id, 'FOYER', { x: corrX, y: entryDepth, w: corrW, h: foyerDepth }, budgets));
     }
   }
-
-  // Side zones ONLY beside the corridor segment (not beside entry/foyer),
-  // so every private room shares ≥1.0m with the corridor.
-  const left: Rect = { x: 0, y: corrY, w: corrX, h: corrH };
-  const right: Rect = { x: corrX + corrW, y: corrY, w: W - corrX - corrW, h: corrH };
-
-  // Private (beds + common baths) on one side, public (living + kitchen) on the other
-  const privateOnLeft = rng.bool(0.55);
-  const privateZone = privateOnLeft ? left : right;
-  let publicZone = privateOnLeft ? right : left;
-
-  type Item = { id: string; cat: AccessNodeCategory; weight: number; ensuiteId?: string };
-  const privateItems: Item[] = [];
-  for (const bed of bedrooms) {
-    const en = ensuites.find(e => e.attachedTo === bed.id);
-    privateItems.push({
-      id: bed.id,
-      cat: 'BEDROOM',
-      weight: budgetFor(budgets, bed.id).targetArea + (en ? budgetFor(budgets, en.id).targetArea : 0),
-      ensuiteId: en?.id,
-    });
-  }
-  for (const bath of commonBaths) {
-    privateItems.push({
-      id: bath.id,
-      cat: 'COMMON_BATHROOM',
-      weight: Math.max(budgetFor(budgets, bath.id).targetArea, 3.5),
-    });
-  }
-
-  stackVertical(privateZone, privateItems, budgets, rooms, /*ensuiteTowardCorridor*/ !privateOnLeft);
-
-  // Public: kitchen + living (living abuts corridor for topology)
-  const kitB = budgetFor(budgets, kitchen.id);
-  const kitH = clamp(
-    publicZone.h * (kitB.targetArea / (kitB.targetArea + budgetFor(budgets, living.id).targetArea)),
-    kitB.minHeight,
-    publicZone.h * 0.4,
-  );
-  const kitchenRect: Rect = fromS
-    ? { x: publicZone.x, y: publicZone.y, w: publicZone.w, h: kitH }
-    : { x: publicZone.x, y: publicZone.y + publicZone.h - kitH, w: publicZone.w, h: kitH };
-
-  if (utility) {
-    const uw = clamp(publicZone.w * 0.3, budgetFor(budgets, utility.id).minWidth, publicZone.w * 0.4);
-    rooms.push(rectRoom(kitchen.id, 'KITCHEN', { x: kitchenRect.x, y: kitchenRect.y, w: kitchenRect.w - uw, h: kitchenRect.h }, budgets));
-    rooms.push(rectRoom(utility.id, 'UTILITY', { x: kitchenRect.x + kitchenRect.w - uw, y: kitchenRect.y, w: uw, h: kitchenRect.h }, budgets));
-  } else {
-    rooms.push(rectRoom(kitchen.id, 'KITCHEN', kitchenRect, budgets));
-  }
-
-  const livingRect: Rect = fromS
-    ? { x: publicZone.x, y: publicZone.y + kitH, w: publicZone.w, h: publicZone.h - kitH }
-    : { x: publicZone.x, y: publicZone.y, w: publicZone.w, h: publicZone.h - kitH };
-  if (fromS) {
-    livingRect.h = H - livingRect.y;
-  } else {
-    livingRect.y = Math.max(0, livingRect.y - circDepth);
-    livingRect.h += circDepth;
-  }
-  rooms.push(rectRoom(living.id, 'LIVING', livingRect, budgets));
-
-  return rooms;
 }
 
-function embedEW(input: EmbedInput): RoomRect[] {
+function embedEW(input: EmbedInput, style: LayoutStyle): RoomRect[] {
   const { tree, budgets, outlineW: W, outlineH: H, entranceDir, seed } = input;
   const rng = new RNG(seed);
+  const params = paramsForStyle(style, rng);
   const fromW = entranceDir === 'W';
   const rooms: RoomRect[] = [];
 
@@ -174,7 +544,7 @@ function embedEW(input: EmbedInput): RoomRect[] {
   const ensuites = all(tree, 'ENSUITE_BATHROOM');
   const utility = optional(tree, 'UTILITY');
 
-  const corrW = 1.05;
+  const corrW = rng.bool(0.4) ? 1.15 : 1.05;
   const entryDepth = clamp(Math.max(budgetFor(budgets, entry.id).minArea / corrW, 1.45), 1.45, 1.7);
   const foyerDepth = foyer
     ? clamp(Math.max(budgetFor(budgets, foyer.id).minArea / corrW, 1.45), 1.45, 1.6)
@@ -183,8 +553,12 @@ function embedEW(input: EmbedInput): RoomRect[] {
 
   const corrX = fromW ? circDepth : 0;
   const corrLen = W - circDepth;
-  const minBand = Math.min(3.2, (H - corrW) * 0.45);
-  const corrY = clamp(H * (0.4 + (rng.next() - 0.5) * 0.06), minBand, H - corrW - minBand);
+  // Living needs ≥3m in the short direction — keep both bands viable
+  const livingMinBand = 3.05;
+  const minBand = Math.min(livingMinBand, (H - corrW) * 0.45);
+  const bandFloor = Math.min(livingMinBand, (H - corrW) / 2 - 0.05);
+  const corrFrac = biasToFrac(params.corrBias, rng);
+  const corrY = clamp(H * corrFrac, bandFloor, H - corrW - bandFloor);
 
   rooms.push(rectRoom(corr.id, 'CORRIDOR', { x: corrX, y: corrY, w: corrLen, h: corrW }, budgets, true));
 
@@ -202,90 +576,159 @@ function embedEW(input: EmbedInput): RoomRect[] {
 
   const top: Rect = { x: corrX, y: 0, w: corrLen, h: corrY };
   const bottom: Rect = { x: corrX, y: corrY + corrW, w: corrLen, h: H - corrY - corrW };
-  const privateOnTop = rng.bool(0.55);
-  const privateZone = privateOnTop ? top : bottom;
-  const publicZone = privateOnTop ? bottom : top;
 
-  type Item = { id: string; cat: AccessNodeCategory; weight: number; ensuiteId?: string };
-  const privateItems: Item[] = [];
-  for (const bed of bedrooms) {
+  // Private (bedrooms) gets the larger band — living is wide enough at min depth
+  const privateOnTop = top.h >= bottom.h
+    ? true
+    : false;
+
+  let privateZone = privateOnTop ? top : bottom;
+  let publicZone = privateOnTop ? bottom : top;
+  void minBand;
+
+  let bedItems = bedrooms.map(bed => {
     const en = ensuites.find(e => e.attachedTo === bed.id);
-    privateItems.push({
+    return {
       id: bed.id,
-      cat: 'BEDROOM',
+      cat: 'BEDROOM' as AccessNodeCategory,
       weight: budgetFor(budgets, bed.id).targetArea + (en ? budgetFor(budgets, en.id).targetArea : 0),
       ensuiteId: en?.id,
-    });
-  }
-  for (const bath of commonBaths) {
-    privateItems.push({
-      id: bath.id,
-      cat: 'COMMON_BATHROOM',
-      weight: Math.max(budgetFor(budgets, bath.id).targetArea, 3.5),
-    });
+    };
+  });
+  let bathItems = commonBaths.map(bath => ({
+    id: bath.id,
+    cat: 'COMMON_BATHROOM' as AccessNodeCategory,
+    weight: Math.max(budgetFor(budgets, bath.id).targetArea, 3.5),
+  }));
+  if (rng.bool(0.75)) bedItems = rng.shuffle(bedItems);
+
+  const livingMinW = Math.max(budgetFor(budgets, living.id).minWidth, 3.0);
+  let guestItem: Item | null = null;
+  if (params.guestWing && bedItems.length >= 2 && publicZone.w >= livingMinW + 3.2) {
+    guestItem = bedItems[bedItems.length - 1];
+    bedItems = bedItems.slice(0, -1);
   }
 
-  stackHorizontal(privateZone, privateItems, budgets, rooms);
+  const kitMinW = Math.max(budgetFor(budgets, kitchen.id).minWidth, 2.1);
+  const wetNeed = bathItems.length * 1.7 + kitMinW + livingMinW;
+  const wetOnPublic = params.wetOnPublic && bathItems.length > 0 && publicZone.w >= wetNeed;
+  const privateBaths = wetOnPublic ? [] : bathItems;
+  const publicBaths = wetOnPublic ? bathItems : [];
+
+  const privateItems = orderPrivateStack(bedItems, privateBaths, params.bathOrder, rng);
+  stackHorizontal(privateZone, privateItems, budgets, rooms, rng);
+
+  let zone = { ...publicZone };
+
+  if (guestItem) {
+    const guestW = clamp(zone.w - livingMinW - kitMinW * 0.5, 2.9, Math.min(3.8, zone.w * 0.36));
+    const guestAtFar = fromW;
+    const guestRect: Rect = guestAtFar
+      ? { x: zone.x + zone.w - guestW, y: zone.y, w: guestW, h: zone.h }
+      : { x: zone.x, y: zone.y, w: guestW, h: zone.h };
+    stackHorizontal(guestRect, [guestItem], budgets, rooms, rng);
+    zone = guestAtFar
+      ? { x: zone.x, y: zone.y, w: zone.w - guestW, h: zone.h }
+      : { x: zone.x + guestW, y: zone.y, w: zone.w - guestW, h: zone.h };
+  }
 
   const kitB = budgetFor(budgets, kitchen.id);
+  const livB = budgetFor(budgets, living.id);
+
+  if (publicBaths.length > 0) {
+    const bathMin = publicBaths.length * 1.7;
+    const kitMin = Math.max(kitB.minWidth, 2.2);
+    const wetW = clamp(bathMin + kitMin, bathMin + kitMin, zone.w - livingMinW);
+    const wetAtFar = fromW;
+    const wetZone: Rect = wetAtFar
+      ? { x: zone.x + zone.w - wetW, y: zone.y, w: wetW, h: zone.h }
+      : { x: zone.x, y: zone.y, w: wetW, h: zone.h };
+    const bathW = Math.min(bathMin, wetW - kitMin);
+    const bathZone: Rect = wetAtFar
+      ? { x: wetZone.x + wetZone.w - bathW, y: wetZone.y, w: bathW, h: wetZone.h }
+      : { x: wetZone.x, y: wetZone.y, w: bathW, h: wetZone.h };
+    const kitZone: Rect = wetAtFar
+      ? { x: wetZone.x, y: wetZone.y, w: wetZone.w - bathW, h: wetZone.h }
+      : { x: wetZone.x + bathW, y: wetZone.y, w: wetZone.w - bathW, h: wetZone.h };
+    stackHorizontal(bathZone, publicBaths, budgets, rooms, rng);
+    placeKitchenInRect(rooms, kitchen.id, utility, kitZone, budgets, true, rng);
+    zone = wetAtFar
+      ? { x: zone.x, y: zone.y, w: zone.w - wetW, h: zone.h }
+      : { x: zone.x + wetW, y: zone.y, w: zone.w - wetW, h: zone.h };
+    pushLivingEW(rooms, living.id, zone, budgets, fromW, W, circDepth, params.livingPocket);
+    return rooms;
+  }
+
   const kitW = clamp(
-    publicZone.w * (kitB.targetArea / (kitB.targetArea + budgetFor(budgets, living.id).targetArea)),
-    kitB.minWidth,
-    publicZone.w * 0.4,
+    zone.w * (kitB.targetArea / (kitB.targetArea + livB.targetArea)),
+    Math.max(kitB.minWidth, 2.1),
+    Math.min(zone.w * 0.4, zone.w - livingMinW),
   );
-  // Kitchen away from entrance (toward far end of corridor)
-  const kitchenRect: Rect = fromW
-    ? { x: publicZone.x + publicZone.w - kitW, y: publicZone.y, w: kitW, h: publicZone.h }
-    : { x: publicZone.x, y: publicZone.y, w: kitW, h: publicZone.h };
+  const kitchenNearEntry = params.kitchenMode === 'stripEntrance' || params.kitchenMode === 'sideOuter';
+  const placeKitFar = kitchenNearEntry ? !fromW : fromW;
 
-  if (utility) {
-    const uh = clamp(publicZone.h * 0.3, budgetFor(budgets, utility.id).minHeight, publicZone.h * 0.4);
-    rooms.push(rectRoom(utility.id, 'UTILITY', { x: kitchenRect.x, y: kitchenRect.y, w: kitchenRect.w, h: uh }, budgets));
-    rooms.push(rectRoom(kitchen.id, 'KITCHEN', { x: kitchenRect.x, y: kitchenRect.y + uh, w: kitchenRect.w, h: kitchenRect.h - uh }, budgets));
-  } else {
-    rooms.push(rectRoom(kitchen.id, 'KITCHEN', kitchenRect, budgets));
-  }
+  const kitchenRect: Rect = placeKitFar
+    ? { x: zone.x + zone.w - kitW, y: zone.y, w: kitW, h: zone.h }
+    : { x: zone.x, y: zone.y, w: kitW, h: zone.h };
 
-  const livingRect: Rect = fromW
-    ? { x: publicZone.x, y: publicZone.y, w: publicZone.w - kitW, h: publicZone.h }
-    : { x: publicZone.x + kitW, y: publicZone.y, w: publicZone.w - kitW, h: publicZone.h };
+  placeKitchenInRect(rooms, kitchen.id, utility, kitchenRect, budgets, true, rng);
 
-  // Absorb entrance-side pocket beside entry into living
-  if (fromW) {
-    livingRect.x = 0;
-    livingRect.w = (publicZone.x + publicZone.w - kitW);
-  } else {
-    livingRect.w = W - livingRect.x;
-  }
-  rooms.push(rectRoom(living.id, 'LIVING', livingRect, budgets));
+  const livingRect: Rect = kitchenRect.x <= zone.x + 0.01
+    ? { x: zone.x + kitW, y: zone.y, w: zone.w - kitW, h: zone.h }
+    : { x: zone.x, y: zone.y, w: zone.w - kitW, h: zone.h };
 
+  pushLivingEW(rooms, living.id, livingRect, budgets, fromW, W, circDepth, params.livingPocket && placeKitFar === fromW);
   return rooms;
+}
+
+function pushLivingEW(
+  rooms: RoomRect[],
+  livingId: string,
+  livingRect: Rect,
+  budgets: AreaBudget[],
+  fromW: boolean,
+  W: number,
+  circDepth: number,
+  absorbPocket: boolean,
+): void {
+  const r = { ...livingRect };
+  if (absorbPocket) {
+    if (fromW) {
+      r.x = 0;
+      r.w = livingRect.x + livingRect.w;
+    } else {
+      r.w = W - r.x;
+    }
+  }
+  void circDepth;
+  rooms.push(rectRoom(livingId, 'LIVING', r, budgets));
 }
 
 function stackVertical(
   zone: Rect,
-  items: { id: string; cat: AccessNodeCategory; weight: number; ensuiteId?: string }[],
+  items: Item[],
   budgets: AreaBudget[],
   rooms: RoomRect[],
   ensuiteOnRight: boolean,
+  rng?: RNG,
 ): void {
-  if (items.length === 0) return;
+  if (items.length === 0 || zone.w < 1.2 || zone.h < 1.2) return;
 
-  // Allocate heights with hard minima so corridor contact ≥ 1.5m for baths
   const mins = items.map(item => {
-    if (item.cat === 'COMMON_BATHROOM') return 1.5;
-    if (item.ensuiteId) return 2.5;
-    return 2.4;
+    if (item.cat === 'COMMON_BATHROOM') return 1.55;
+    if (item.ensuiteId) return 2.6;
+    return 2.5;
   });
   const minSum = mins.reduce((s, m) => s + m, 0);
-  const weights = items.map(i => i.weight);
+  const weights = items.map(i => i.weight * (0.88 + (rng?.next() ?? 0.5) * 0.24));
   const totalW = weights.reduce((s, w) => s + w, 0) || 1;
+
   let heights: number[];
   if (minSum >= zone.h - 0.01) {
     heights = mins.map(m => (m / minSum) * zone.h);
   } else {
     const extra = zone.h - minSum;
-    heights = items.map((item, i) => mins[i] + extra * (weights[i] / totalW));
+    heights = items.map((_, i) => mins[i] + extra * (weights[i] / totalW));
   }
 
   let y = zone.y;
@@ -297,14 +740,25 @@ function stackVertical(
       const eb = budgetFor(budgets, item.ensuiteId);
       const ew = clamp(Math.max(eb.minWidth, eb.minArea / Math.max(1.5, h)), eb.minWidth, zone.w * 0.38);
       const eh = Math.min(h, Math.max(eb.minHeight, eb.minArea / ew));
-      const ensuiteRect: Rect = ensuiteOnRight
-        ? { x: slot.x + slot.w - ew, y: slot.y, w: ew, h: eh }
-        : { x: slot.x, y: slot.y, w: ew, h: eh };
-      const bedRect: Rect = ensuiteOnRight
-        ? { x: slot.x, y: slot.y, w: slot.w - ew, h: slot.h }
-        : { x: slot.x + ew, y: slot.y, w: slot.w - ew, h: slot.h };
-      rooms.push(rectRoom(item.id, item.cat, bedRect, budgets));
-      rooms.push(rectRoom(item.ensuiteId, 'ENSUITE_BATHROOM', ensuiteRect, budgets));
+      // Prefer side-by-side ensuite (more reliable dims); rare vertical only when tall
+      const verticalEnsuite = (rng?.bool(0.12) ?? false) && h >= 3.6 && slot.w < 3.4;
+      if (verticalEnsuite) {
+        rooms.push(rectRoom(item.id, item.cat, {
+          x: slot.x, y: slot.y + eh, w: slot.w, h: slot.h - eh,
+        }, budgets));
+        rooms.push(rectRoom(item.ensuiteId, 'ENSUITE_BATHROOM', {
+          x: slot.x, y: slot.y, w: slot.w, h: eh,
+        }, budgets));
+      } else {
+        const ensuiteRect: Rect = ensuiteOnRight
+          ? { x: slot.x + slot.w - ew, y: slot.y, w: ew, h: eh }
+          : { x: slot.x, y: slot.y, w: ew, h: eh };
+        const bedRect: Rect = ensuiteOnRight
+          ? { x: slot.x, y: slot.y, w: slot.w - ew, h: slot.h }
+          : { x: slot.x + ew, y: slot.y, w: slot.w - ew, h: slot.h };
+        rooms.push(rectRoom(item.id, item.cat, bedRect, budgets));
+        rooms.push(rectRoom(item.ensuiteId, 'ENSUITE_BATHROOM', ensuiteRect, budgets));
+      }
     } else {
       rooms.push(rectRoom(item.id, item.cat, slot, budgets));
     }
@@ -314,19 +768,21 @@ function stackVertical(
 
 function stackHorizontal(
   zone: Rect,
-  items: { id: string; cat: AccessNodeCategory; weight: number; ensuiteId?: string }[],
+  items: Item[],
   budgets: AreaBudget[],
   rooms: RoomRect[],
+  rng?: RNG,
 ): void {
-  if (items.length === 0) return;
+  if (items.length === 0 || zone.w < 1.2 || zone.h < 1.2) return;
 
+  // Ensuite slots need extra width so bed area stays ≥ ~9.5 after carving bath
   const mins = items.map(item => {
-    if (item.cat === 'COMMON_BATHROOM') return 1.5;
-    if (item.ensuiteId) return 3.2;
-    return 2.8;
+    if (item.cat === 'COMMON_BATHROOM') return 1.7;
+    if (item.ensuiteId) return Math.max(3.9, 9.5 / Math.max(zone.h, 2.5) + 1.25);
+    return Math.max(2.9, 9.5 / Math.max(zone.h, 2.5));
   });
   const minSum = mins.reduce((s, m) => s + m, 0);
-  const weights = items.map(i => i.weight);
+  const weights = items.map(i => i.weight * (0.88 + (rng?.next() ?? 0.5) * 0.24));
   const totalW = weights.reduce((s, w) => s + w, 0) || 1;
   let widths: number[];
   if (minSum >= zone.w - 0.01) {
@@ -342,11 +798,21 @@ function stackHorizontal(
     const w = i === items.length - 1 ? zone.x + zone.w - x : widths[i];
     const slot: Rect = { x, y: zone.y, w, h: zone.h };
     if (item.ensuiteId) {
-      // Carve ensuite beside bed so bedroom keeps full band height for area
       const eb = budgetFor(budgets, item.ensuiteId);
-      const ew = clamp(Math.max(eb.minWidth, eb.minArea / Math.max(1.5, zone.h)), eb.minWidth, slot.w * 0.38);
-      const ensuiteRect: Rect = { x: slot.x, y: slot.y, w: ew, h: slot.h };
-      const bedRect: Rect = { x: slot.x + ew, y: slot.y, w: slot.w - ew, h: slot.h };
+      // Cap ensuite width so bedroom keeps min area
+      const maxEw = Math.max(eb.minWidth, slot.w - 9.5 / Math.max(slot.h, 2.5));
+      const ew = clamp(
+        Math.max(eb.minWidth, eb.minArea / Math.max(1.5, zone.h)),
+        eb.minWidth,
+        Math.min(slot.w * 0.35, maxEw),
+      );
+      const ensuiteOnLeft = rng?.bool(0.5) ?? true;
+      const ensuiteRect: Rect = ensuiteOnLeft
+        ? { x: slot.x, y: slot.y, w: ew, h: slot.h }
+        : { x: slot.x + slot.w - ew, y: slot.y, w: ew, h: slot.h };
+      const bedRect: Rect = ensuiteOnLeft
+        ? { x: slot.x + ew, y: slot.y, w: slot.w - ew, h: slot.h }
+        : { x: slot.x, y: slot.y, w: slot.w - ew, h: slot.h };
       rooms.push(rectRoom(item.id, item.cat, bedRect, budgets));
       rooms.push(rectRoom(item.ensuiteId, 'ENSUITE_BATHROOM', ensuiteRect, budgets));
     } else {
@@ -370,8 +836,8 @@ function rectRoom(
     type: categoryToLiveType(category) as LiveRoomType,
     x: round(rect.x),
     y: round(rect.y),
-    w: round(rect.w),
-    h: round(rect.h),
+    w: round(Math.max(0.5, rect.w)),
+    h: round(Math.max(0.5, rect.h)),
     targetArea: b.targetArea,
     minDimension: Math.min(b.minWidth, b.minHeight),
   };

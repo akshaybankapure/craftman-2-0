@@ -2,11 +2,11 @@ import type { ProgramSpec } from '../types/index.ts';
 import { buildAreaBudgets, InfeasibleProgrammeError } from './budget/areaBudget.ts';
 import { createCorridorSpine } from './circulation/corridorSpine.ts';
 import { placeDoors } from './doors/placeDoors.ts';
-import { embedRooms } from './embedding/embedRooms.ts';
+import { embedRooms, pickLayoutStyle, type LayoutStyle } from './embedding/embedRooms.ts';
 import { computeSharedWalls } from './geometry/sharedWalls.ts';
 import { buildPortalGraph, buildRoutes } from './graph/portalGraph.ts';
 import { compareLexico, lexicoScores, optimizeValidPlan } from './optimize/validPlanOptimizer.ts';
-import { dedupePlans } from './dedupe/planSignature.ts';
+import { dedupePlans, geometricSimilarity } from './dedupe/planSignature.ts';
 import { generateAccessTree } from './topology/generateAccessTrees.ts';
 import { floorPlanToSolveProblem } from './toFloorGraph.ts';
 import { validateFloorPlan } from './validate/validateFloorPlan.ts';
@@ -45,9 +45,9 @@ export function generateFloorPlanOptions(
   entranceDir: EntranceDirection,
   options: GenerateOptions = {},
 ): GenerateResult {
-  const seeds = options.seeds ?? 40;
+  const seeds = options.seeds ?? 60;
   const retain = options.retain ?? 6;
-  const optimizeIterations = options.optimizeIterations ?? 60;
+  const optimizeIterations = options.optimizeIterations ?? 40;
   const doorConfig = options.doorConfig ?? DEFAULT_DOOR_CONFIG;
   const baseSeed = options.baseSeed ?? 42;
 
@@ -55,9 +55,14 @@ export function generateFloorPlanOptions(
   let attempts = 0;
   let infeasible: string | undefined;
 
+  const styles: LayoutStyle[] = [
+    'classic', 'offset', 'livingFront', 'wetCluster', 'splitWings', 'gallery',
+  ];
+
   for (let i = 0; i < seeds; i++) {
     attempts++;
     const seed = baseSeed + i * 9973;
+    const style = styles[i % styles.length];
     try {
       const plan = generateOne(
         spec,
@@ -65,8 +70,9 @@ export function generateFloorPlanOptions(
         outlineH,
         entranceDir,
         seed,
-        i % 4,
+        i % 5,
         doorConfig,
+        style,
       );
       if (!plan) continue;
       if (!plan.validation.valid) continue;
@@ -92,17 +98,48 @@ export function generateFloorPlanOptions(
     }
   }
 
-  const unique = dedupePlans(valid);
+  // Slightly looser geometric dedupe so creative variants survive
+  const unique = dedupePlans(valid, 0.88);
   unique.sort((a, b) =>
     compareLexico(a.scores?.lexico ?? lexicoScores(a), b.scores?.lexico ?? lexicoScores(b)),
   );
 
+  // Prefer a diverse retained set over the N most similar top scores
+  const plans = pickDiversePlans(unique, retain);
+
   return {
-    plans: unique.slice(0, retain),
-    infeasible: unique.length === 0 ? infeasible ?? 'No valid layouts found for this programme' : undefined,
+    plans,
+    infeasible: plans.length === 0 ? infeasible ?? 'No valid layouts found for this programme' : undefined,
     attempts,
     validCount: valid.length,
   };
+}
+
+/** Greedy diverse pick: take best, then farthest from already picked. */
+function pickDiversePlans(ranked: FloorPlan[], retain: number): FloorPlan[] {
+  if (ranked.length <= retain) return ranked;
+  const picked: FloorPlan[] = [ranked[0]];
+  const rest = ranked.slice(1);
+  while (picked.length < retain && rest.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < rest.length; i++) {
+      const minDist = Math.min(...picked.map(p => 1 - geometricSimilarity(p, rest[i])));
+      // Mix diversity with quality rank (earlier in list = better)
+      const quality = 1 - i / rest.length;
+      const score = minDist * 0.75 + quality * 0.25;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    picked.push(rest.splice(bestIdx, 1)[0]);
+  }
+  // Re-sort picked by quality for stable UI ordering
+  picked.sort((a, b) =>
+    compareLexico(a.scores?.lexico ?? lexicoScores(a), b.scores?.lexico ?? lexicoScores(b)),
+  );
+  return picked;
 }
 
 export function generateOne(
@@ -113,6 +150,7 @@ export function generateOne(
   seed: number,
   variant: number,
   doorConfig: DoorConfig = DEFAULT_DOOR_CONFIG,
+  layoutStyle?: LayoutStyle,
 ): FloorPlan | null {
   // Phase A: topology
   const topology = generateAccessTree(spec, seed, variant);
@@ -124,6 +162,8 @@ export function generateOne(
   const foyerId = topology.nodes.find(n => n.category === 'FOYER')?.id ?? null;
   const corridorId = topology.nodes.find(n => n.category === 'CORRIDOR')!.id;
 
+  const style = layoutStyle ?? pickLayoutStyle(seed, variant);
+
   // Phase B: circulation spine
   const { spine, entryRect, foyerRect, corridorRects } = createCorridorSpine({
     outlineW,
@@ -134,14 +174,11 @@ export function generateOne(
     foyerId,
     budgets,
     seed,
-    shapeVariant: variant,
+    shapeVariant: style === 'offset' ? 2 : style === 'gallery' ? 1 : variant,
   });
 
-  // Phase C: embed rooms (structured; spine rects used as hints)
-  void entryRect;
-  void foyerRect;
-  void corridorRects;
-  let rooms = embedRooms({
+  // Phase C: embed with creative layout style
+  const rooms = embedRooms({
     tree: topology,
     budgets,
     spine,
@@ -152,6 +189,7 @@ export function generateOne(
     outlineH,
     entranceDir,
     seed,
+    layoutStyle: style,
   });
 
   // Phase D + E — tiling already encodes adjacencies; skip destructive repairs

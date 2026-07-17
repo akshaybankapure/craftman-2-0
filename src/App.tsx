@@ -198,10 +198,10 @@ const App: React.FC = () => {
 
     setTimeout(() => {
       const result = generateFloorPlanOptions(spec, outlineW, outlineH, entranceDir, {
-        seeds: 40,
+        seeds: 72,
         retain: 6,
         baseSeed: Date.now() % 100000,
-        optimizeIterations: 50,
+        optimizeIterations: 35,
       });
 
       if (result.infeasible && result.plans.length === 0) {
@@ -225,10 +225,10 @@ const App: React.FC = () => {
       setTelemetry(prev => [...prev, '[ai] generating + selecting best valid layout...']);
       setTimeout(() => {
         const result = generateFloorPlanOptions(spec, outlineW, outlineH, entranceDir, {
-          seeds: 40,
+          seeds: 72,
           retain: 6,
           baseSeed: Date.now() % 100000,
-          optimizeIterations: 50,
+          optimizeIterations: 35,
         });
         if (result.plans.length === 0) {
           setTelemetry(prev => [...prev, `[error] ${result.infeasible ?? 'no valid plans'}`]);

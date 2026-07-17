@@ -46,8 +46,8 @@ function buildTree(prog: TopologyProgramme, rng: RNG, variant: number): AccessTr
   };
 
   const entry = id('ENTRY', 'Entry');
-  // Prefer no foyer on tighter footprints (more height for rooms)
-  const useFoyer = prog.hasFoyer && variant === 1 && rng.bool(0.5);
+  // Foyer on some variants for topological variety
+  const useFoyer = prog.hasFoyer && (variant === 1 || variant === 3) && rng.bool(0.55);
   const foyer = useFoyer ? id('FOYER', 'Foyer') : null;
   const corridor = id('CORRIDOR', 'Corridor');
   const living = id('LIVING', 'Living');
@@ -56,14 +56,9 @@ function buildTree(prog: TopologyProgramme, rng: RNG, variant: number): AccessTr
   if (foyer) {
     link(edges, entry.id, foyer.id);
     link(edges, foyer.id, corridor.id);
+    link(edges, corridor.id, living.id);
   } else {
     link(edges, entry.id, corridor.id);
-  }
-
-  // Living always off corridor (preferred); rare foyer-living for variant 1
-  if (foyer && variant === 1 && rng.bool(0.4)) {
-    link(edges, foyer.id, living.id);
-  } else {
     link(edges, corridor.id, living.id);
   }
 
@@ -94,7 +89,7 @@ function buildTree(prog: TopologyProgramme, rng: RNG, variant: number): AccessTr
     link(edges, corridor.id, bath.id);
   }
 
-  // Bedrooms always prefer corridor parent for reliable shared walls
+  // Bedrooms off corridor (reliable shared walls with spine)
   bedrooms.forEach(bed => {
     link(edges, corridor.id, bed.id);
   });

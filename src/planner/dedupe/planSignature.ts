@@ -43,7 +43,7 @@ export function geometricSimilarity(a: FloorPlan, b: FloorPlan): number {
   return sum / Math.max(1, n);
 }
 
-export function dedupePlans(plans: FloorPlan[], similarityThreshold = 0.97): FloorPlan[] {
+export function dedupePlans(plans: FloorPlan[], similarityThreshold = 0.94): FloorPlan[] {
   const out: FloorPlan[] = [];
   const sigs = new Set<string>();
   for (const p of plans) {
