@@ -95,6 +95,117 @@ function shapeScore(graph: FloorGraph): number {
   return Math.min(1, totalPenalty / graph.faces.size);
 }
 
+const VALID_CONNECTIONS: Record<string, string[]> = {
+  entry: ['living', 'corridor'],
+  bathroom: ['corridor', 'bedroom', 'living'],
+  kitchen: ['living', 'corridor'],
+  bedroom: ['corridor', 'living', 'bathroom'],
+  corridor: ['living', 'kitchen', 'bedroom', 'bathroom', 'entry', 'corridor'],
+  living: ['entry', 'kitchen', 'bedroom', 'corridor', 'bathroom', 'living'],
+  storage: ['corridor', 'kitchen', 'living'],
+  office: ['corridor', 'living', 'bedroom'],
+};
+
+export function isValidDoorTransition(typeA: string, typeB: string): boolean {
+  if (typeA === typeB) return true;
+  // If either room is of an unknown type (e.g. storage, office, or custom test types), allow it as a fallback.
+  if (!VALID_CONNECTIONS[typeA] || !VALID_CONNECTIONS[typeB]) return true;
+  const allowed = VALID_CONNECTIONS[typeA] || [];
+  return allowed.includes(typeB);
+}
+
+function getSharedEdges(graph: FloorGraph): Map<string, { faceA: string, faceB: string, edgeId: string }> {
+  const edgeToFaces = new Map<string, string[]>();
+  for (const [faceId, face] of graph.faces) {
+    const loop = face.loop;
+    const n = loop.length;
+    for (let i = 0; i < n; i++) {
+      const v1 = loop[i];
+      const v2 = loop[(i + 1) % n];
+      const sortedEdgeKey = v1 < v2 ? `${v1}-${v2}` : `${v2}-${v1}`;
+      
+      for (const [edgeId, edge] of graph.edges) {
+        const ea = edge.a;
+        const eb = edge.b;
+        const eKey = ea < eb ? `${ea}-${eb}` : `${eb}-${ea}`;
+        if (eKey === sortedEdgeKey) {
+          const list = edgeToFaces.get(edgeId) ?? [];
+          list.push(faceId);
+          edgeToFaces.set(edgeId, list);
+          break;
+        }
+      }
+    }
+  }
+  
+  const shared = new Map<string, { faceA: string, faceB: string, edgeId: string }>();
+  for (const [edgeId, faces] of edgeToFaces) {
+    if (faces.length === 2) {
+      const [fa, fb] = faces;
+      const key = fa < fb ? `${fa}-${fb}` : `${fb}-${fa}`;
+      shared.set(key, { faceA: fa, faceB: fb, edgeId });
+    }
+  }
+  return shared;
+}
+
+export function computeRoomIntegration(graph: FloorGraph) {
+  let entryId: string | null = null;
+  for (const [faceId, face] of graph.faces) {
+    if (face.type === 'entry') {
+      entryId = faceId;
+      break;
+    }
+  }
+  
+  const pathLengths = new Map<string, number>();
+  if (!entryId) {
+    return { flowScore: 0, pathLengths, noEntry: true };
+  }
+  
+  const adj = new Map<string, string[]>();
+  for (const [faceId] of graph.faces) {
+    adj.set(faceId, []);
+  }
+  
+  const sharedEdges = getSharedEdges(graph);
+  for (const { faceA, faceB } of sharedEdges.values()) {
+    const faceAObj = graph.faces.get(faceA)!;
+    const faceBObj = graph.faces.get(faceB)!;
+    if (isValidDoorTransition(faceAObj.type, faceBObj.type)) {
+      adj.get(faceA)!.push(faceB);
+      adj.get(faceB)!.push(faceA);
+    }
+  }
+  
+  const queue: string[] = [entryId];
+  pathLengths.set(entryId, 0);
+  
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    const dist = pathLengths.get(curr)!;
+    
+    for (const neighbor of adj.get(curr)!) {
+      if (!pathLengths.has(neighbor)) {
+        pathLengths.set(neighbor, dist + 1);
+        queue.push(neighbor);
+      }
+    }
+  }
+  
+  let sum = 0;
+  let count = 0;
+  for (const [faceId, face] of graph.faces) {
+    if (faceId === entryId) continue;
+    const len = pathLengths.get(faceId) ?? 6;
+    sum += len;
+    count++;
+  }
+  
+  const flowScore = count > 0 ? sum / count : 0;
+  return { flowScore, pathLengths, noEntry: false };
+}
+
 function loopToPts(graph: FloorGraph, loop: string[]): Vec2[] {
   return loop.map(id => graph.vertices.get(id)!.pos);
 }
@@ -103,9 +214,45 @@ export function scoreObjectives(
   graph: FloorGraph,
   outline: Vec2[]
 ): ObjectiveScores {
+  const flowInfo = computeRoomIntegration(graph);
+  
+  // Count isolated rooms (only if an entry room exists)
+  let isolatedCount = 0;
+  if (!flowInfo.noEntry) {
+    for (const [faceId] of graph.faces) {
+      if (!flowInfo.pathLengths.has(faceId)) {
+        isolatedCount++;
+      }
+    }
+  }
+  
+  // Check corridor bridge utility
+  let corridorPenalty = 0;
+  const sharedEdges = getSharedEdges(graph);
+  for (const [faceId, face] of graph.faces) {
+    if (face.type === 'corridor') {
+      let adjCount = 0;
+      for (const { faceA, faceB } of sharedEdges.values()) {
+        if (faceA === faceId || faceB === faceId) {
+          const neighbor = faceA === faceId ? faceB : faceA;
+          const neighborObj = graph.faces.get(neighbor)!;
+          if (isValidDoorTransition(face.type, neighborObj.type)) {
+            adjCount++;
+          }
+        }
+      }
+      if (adjCount < 2) {
+        corridorPenalty += 0.5; // corridor must bridge at least 2 rooms
+      }
+    }
+  }
+
+  const baseCirculation = circulation(graph);
+  const layoutPenalty = shapeScore(graph) + (isolatedCount * 2.0) + corridorPenalty;
+
   return {
     areaError: areaError(graph),
-    circulation: circulation(graph) + shapeScore(graph), // combine for simplicity or add to type
+    circulation: baseCirculation + layoutPenalty,
     daylight: daylight(graph, outline),
     structuralIrregularity: structuralIrregularity(graph),
   };

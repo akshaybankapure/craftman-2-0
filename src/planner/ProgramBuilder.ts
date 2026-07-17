@@ -46,14 +46,18 @@ export interface RoomRect {
   minDimension: number;
 }
 
+export type EntranceDirection = 'N' | 'S' | 'E' | 'W';
+
 /**
  * Given a ProgramSpec and a genome, produce a fully-constructed SolveProblem.
+ * entranceDirection controls which boundary edge the entry room is placed on.
  */
 export function buildFromSpec(
   spec: ProgramSpec,
   outlineW: number,
   outlineH: number,
-  genome: number[]
+  genome: number[],
+  entranceDirection: EntranceDirection = 'S'
 ): SolveProblem {
   // 1. Flatten the room list (expand counts)
   const rooms: { type: RoomType; targetArea: number; minDimension: number }[] = [];
@@ -76,8 +80,62 @@ export function buildFromSpec(
     0
   );
 
-  // 4. Convert rectangles to a planar graph
+  // 4. Place entry room on the correct boundary edge
+  placeEntryOnEdge(rects, outlineW, outlineH, entranceDirection);
+
+  // 5. Convert rectangles to a planar graph
   return rectsToGraph(rects, outlineW, outlineH, spec);
+}
+
+/**
+ * Swap the entry room rect with whatever room is closest to the specified
+ * boundary edge, so the entry always sits on the correct wall.
+ */
+function placeEntryOnEdge(
+  rects: RoomRect[],
+  outlineW: number,
+  outlineH: number,
+  dir: EntranceDirection
+): void {
+  const entryIdx = rects.findIndex(r => r.type === 'entry');
+  if (entryIdx < 0) return;
+
+  // Find the room closest to the target boundary edge
+  let bestIdx = entryIdx;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    let dist: number;
+    switch (dir) {
+      case 'S': dist = (outlineH - (r.y + r.h)); break; // bottom edge
+      case 'N': dist = r.y; break;                       // top edge
+      case 'W': dist = r.x; break;                       // left edge
+      case 'E': dist = (outlineW - (r.x + r.w)); break;  // right edge
+    }
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+
+  if (bestIdx !== entryIdx) {
+    // Swap the rects' positions and dimensions, keep type/area metadata
+    const entryRect = rects[entryIdx];
+    const targetRect = rects[bestIdx];
+
+    const tmpX = entryRect.x, tmpY = entryRect.y, tmpW = entryRect.w, tmpH = entryRect.h;
+    entryRect.x = targetRect.x;
+    entryRect.y = targetRect.y;
+    entryRect.w = targetRect.w;
+    entryRect.h = targetRect.h;
+    targetRect.x = tmpX;
+    targetRect.y = tmpY;
+    targetRect.w = tmpW;
+    targetRect.h = tmpH;
+  }
 }
 
 interface PartitionResult {

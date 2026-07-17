@@ -84,6 +84,8 @@ export interface SolveOptions {
   damping: number;
   /** Convergence threshold: stop when max vertex movement < this (meters). */
   epsilon: number;
+  /** If true, strictly aligns all edges to be horizontal or vertical. */
+  rectilinear?: boolean;
 }
 
 export const DEFAULT_SOLVE_OPTIONS: SolveOptions = {
@@ -91,6 +93,7 @@ export const DEFAULT_SOLVE_OPTIONS: SolveOptions = {
   hardSubsteps: 3,
   damping: 0.85,
   epsilon: 1e-4,
+  rectilinear: true,
 };
 
 /** Accumulator: we sum corrections per vertex and apply once per pass, so a
@@ -118,16 +121,90 @@ export class ConstraintSolver {
     const hard = this.constraints.filter((c) => c.hard);
     const soft = this.constraints.filter((c) => !c.hard);
 
+    // Group vertices by their initial X and Y coordinates (rounded to 1mm)
+    // to enforce grid-alignment and prevent T-junction walls from drifting.
+    const xGroups = new Map<number, string[]>();
+    const yGroups = new Map<number, string[]>();
+
+    if (opts.rectilinear) {
+      for (const [id, vert] of this.graph.vertices) {
+        const gx = Math.round(vert.pos.x * 1000);
+        const gy = Math.round(vert.pos.y * 1000);
+        
+        if (!xGroups.has(gx)) xGroups.set(gx, []);
+        xGroups.get(gx)!.push(id);
+        
+        if (!yGroups.has(gy)) yGroups.set(gy, []);
+        yGroups.get(gy)!.push(id);
+      }
+    }
+
+    const enforceGrid = () => {
+      if (!opts.rectilinear) return;
+      
+      // Align X coordinates
+      for (const [_, ids] of xGroups) {
+        let sum = 0;
+        let count = 0;
+        let pinnedVal: number | null = null;
+        
+        for (const id of ids) {
+          const v = this.graph.vertices.get(id)!;
+          if (v.pinned) {
+            pinnedVal = v.pos.x;
+            break;
+          }
+          sum += v.pos.x;
+          count++;
+        }
+        
+        const targetX = pinnedVal !== null ? pinnedVal : (count > 0 ? sum / count : 0);
+        for (const id of ids) {
+          const v = this.graph.vertices.get(id)!;
+          if (!v.pinned) {
+            v.pos.x = targetX;
+          }
+        }
+      }
+
+      // Align Y coordinates
+      for (const [_, ids] of yGroups) {
+        let sum = 0;
+        let count = 0;
+        let pinnedVal: number | null = null;
+        
+        for (const id of ids) {
+          const v = this.graph.vertices.get(id)!;
+          if (v.pinned) {
+            pinnedVal = v.pos.y;
+            break;
+          }
+          sum += v.pos.y;
+          count++;
+        }
+        
+        const targetY = pinnedVal !== null ? pinnedVal : (count > 0 ? sum / count : 0);
+        for (const id of ids) {
+          const v = this.graph.vertices.get(id)!;
+          if (!v.pinned) {
+            v.pos.y = targetY;
+          }
+        }
+      }
+    };
+
     for (let iter = 0; iter < opts.iterations; iter++) {
       let maxMove = 0;
       // Inner loop: project hard constraints to feasibility first.
       for (let s = 0; s < opts.hardSubsteps; s++) {
         const move = this.projectPass(hard, opts.damping);
         maxMove = Math.max(maxMove, move);
+        enforceGrid();
       }
       // Then a single soft pass nudges toward the objective.
       const move = this.projectPass(soft, opts.damping);
       maxMove = Math.max(maxMove, move);
+      enforceGrid();
 
       if (maxMove < opts.epsilon) return iter + 1;
     }
@@ -390,12 +467,23 @@ export class ConstraintSolver {
     // Nearest multiple of 90 degrees.
     const snapped = (Math.round(ang / (Math.PI / 2)) * Math.PI) / 2;
     const targetDir = { x: Math.cos(snapped), y: Math.sin(snapped) };
-    const mid = scale(add(a.pos, b.pos), 0.5);
-    const half = (l / 2);
-    const newA = sub(mid, scale(targetDir, half));
-    const newB = add(mid, scale(targetDir, half));
-    out(edge.a, sub(newA, a.pos), w);
-    out(edge.b, sub(newB, b.pos), w);
+    
+    if (a.pinned && b.pinned) {
+      return;
+    } else if (a.pinned) {
+      const newB = add(a.pos, scale(targetDir, l));
+      out(edge.b, sub(newB, b.pos), w);
+    } else if (b.pinned) {
+      const newA = sub(b.pos, scale(targetDir, l));
+      out(edge.a, sub(newA, a.pos), w);
+    } else {
+      const mid = scale(add(a.pos, b.pos), 0.5);
+      const half = (l / 2);
+      const newA = sub(mid, scale(targetDir, half));
+      const newB = add(mid, scale(targetDir, half));
+      out(edge.a, sub(newA, a.pos), w);
+      out(edge.b, sub(newB, b.pos), w);
+    }
   }
 
   // --- Adjacency --------------------------------------------------------------
