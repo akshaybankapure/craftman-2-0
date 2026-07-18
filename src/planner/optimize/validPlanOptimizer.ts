@@ -1,17 +1,18 @@
 import { roomArea } from '../types.ts';
-import type { AreaBudget, FloorPlan, RoomRect } from '../types.ts';
+import type { AreaBudget, EntranceDirection, FloorPlan, RoomRect } from '../types.ts';
 import { validateCompletePlan } from '../validate/validateFloorPlan.ts';
 import { computeSharedWalls } from '../geometry/sharedWalls.ts';
 import { placeDoors } from '../doors/placeDoors.ts';
 import { buildPortalGraph, buildRoutes } from '../graph/portalGraph.ts';
 import { RNG } from '../rng.ts';
 import { budgetFor } from '../budget/areaBudget.ts';
+import { DEFAULT_DESIGN_PREFS, isDaylightCategory, type DesignPrefs } from './designPrefs.ts';
 
 /**
  * Lexicographic scores (lower better). P1 validity is gated before calling this.
- * P2: area/daylight/privacy; P3: corridor/wet/shape; P4: balance.
+ * Soft terms are parameterized by DesignPrefs when provided.
  */
-export function lexicoScores(plan: FloorPlan): number[] {
+export function lexicoScores(plan: FloorPlan, prefs: DesignPrefs = DEFAULT_DESIGN_PREFS): number[] {
   const rooms = plan.rooms;
   const budgets = plan.budgets;
   let areaErr = 0;
@@ -21,26 +22,21 @@ export function lexicoScores(plan: FloorPlan): number[] {
   }
   areaErr /= Math.max(1, rooms.length);
 
-  const habitable = rooms.filter(r =>
-    r.category === 'LIVING' || r.category === 'BEDROOM' || r.category === 'KITCHEN'
-  );
-  let daylight = 0;
-  for (const r of habitable) {
-    const onExt =
-      r.x < 0.15 || r.y < 0.15 ||
-      r.x + r.w > plan.outlineW - 0.15 ||
-      r.y + r.h > plan.outlineH - 0.15;
-    if (!onExt) daylight += 1;
-  }
-  daylight /= Math.max(1, habitable.length);
-
-  const privacy = privacyGradientError(plan);
-  const corridorEff = plan.validation.metrics.corridorAreaRatio;
+  const daylight = daylightScore(plan, prefs);
+  const privacy = privacyGradientError(plan, prefs);
+  const corridorEff = corridorScore(plan, prefs);
   const wet = wetClusterScore(rooms);
-  const shape = shapePenalty(rooms);
+  const shape = shapePenalty(rooms, prefs.maxAspectRatio);
   const balance = centroidBalance(rooms, plan.outlineW, plan.outlineH);
 
   return [areaErr, daylight, privacy, corridorEff, wet, shape, balance];
+}
+
+/** Recompute soft scores with current design preferences. */
+export function rescorePlan(plan: FloorPlan, prefs: DesignPrefs = DEFAULT_DESIGN_PREFS): FloorPlan {
+  const next = clonePlan(plan);
+  next.scores = scorePack(next, prefs);
+  return next;
 }
 
 export function compareLexico(a: number[], b: number[]): number {
@@ -57,11 +53,15 @@ export function compareLexico(a: number[], b: number[]): number {
  * Simulated annealing over valid geometry transforms only.
  * Rejects immediately if validation fails after mutation.
  */
-export function optimizeValidPlan(plan: FloorPlan, iterations = 80): FloorPlan {
+export function optimizeValidPlan(
+  plan: FloorPlan,
+  iterations = 80,
+  prefs: DesignPrefs = DEFAULT_DESIGN_PREFS,
+): FloorPlan {
   if (!plan.validation.valid) return plan;
   const rng = new RNG(plan.seed ^ 0x9e3779b9);
   let current = clonePlan(plan);
-  current.scores = { ...scorePack(current) };
+  current.scores = { ...scorePack(current, prefs) };
   let best = clonePlan(current);
 
   let T = 1.0;
@@ -74,7 +74,7 @@ export function optimizeValidPlan(plan: FloorPlan, iterations = 80): FloorPlan {
       T *= 0.97;
       continue;
     }
-    candidate.scores = scorePack(candidate);
+    candidate.scores = scorePack(candidate, prefs);
     const d = compareLexico(candidate.scores.lexico, current.scores!.lexico);
     if (d < 0 || rng.next() < Math.exp(-d / Math.max(1e-6, T))) {
       current = candidate;
@@ -87,8 +87,8 @@ export function optimizeValidPlan(plan: FloorPlan, iterations = 80): FloorPlan {
   return best;
 }
 
-function scorePack(plan: FloorPlan) {
-  const lex = lexicoScores(plan);
+function scorePack(plan: FloorPlan, prefs: DesignPrefs = DEFAULT_DESIGN_PREFS) {
+  const lex = lexicoScores(plan, prefs);
   return {
     areaError: lex[0],
     daylight: lex[1],
@@ -263,8 +263,48 @@ function clonePlan(plan: FloorPlan): FloorPlan {
   };
 }
 
-function privacyGradientError(plan: FloorPlan): number {
-  // Bedrooms should be farther from entry than living
+function daylightScore(plan: FloorPlan, prefs: DesignPrefs): number {
+  const targets = plan.rooms.filter(r => isDaylightCategory(r.category, prefs));
+  if (targets.length === 0) return 0;
+  let err = 0;
+  for (const r of targets) {
+    const faces = exteriorFaces(r, plan.outlineW, plan.outlineH);
+    if (faces.length === 0) {
+      err += 1;
+      continue;
+    }
+    // Preferred façades: missing them costs extra; wrong-only exterior still partial credit
+    if (prefs.daylightFacades.length > 0) {
+      const hit = faces.some(f => prefs.daylightFacades.includes(f));
+      err += hit ? 0 : 0.45;
+    }
+  }
+  return err / targets.length;
+}
+
+function exteriorFaces(
+  r: RoomRect,
+  W: number,
+  H: number,
+  eps = 0.15,
+): EntranceDirection[] {
+  // Planner coords: entrance S sits at high Y (see embedRooms placeEntryFoyerNS).
+  const faces: EntranceDirection[] = [];
+  if (r.y < eps) faces.push('N');
+  if (r.y + r.h > H - eps) faces.push('S');
+  if (r.x < eps) faces.push('W');
+  if (r.x + r.w > W - eps) faces.push('E');
+  return faces;
+}
+
+function corridorScore(plan: FloorPlan, prefs: DesignPrefs): number {
+  const ratio = plan.validation.metrics.corridorAreaRatio;
+  const target = Math.max(0.04, prefs.maxCorridorRatio);
+  // Soft hinge: below target is fine; above grows linearly
+  return Math.max(0, ratio - target) / Math.max(0.05, target);
+}
+
+function privacyGradientError(plan: FloorPlan, prefs: DesignPrefs): number {
   const entry = plan.rooms.find(r => r.category === 'ENTRY');
   const living = plan.rooms.find(r => r.category === 'LIVING');
   if (!entry || !living) return 0;
@@ -278,9 +318,29 @@ function privacyGradientError(plan: FloorPlan): number {
     const c = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
     const d = Math.hypot(c.x - ec.x, c.y - ec.y);
     if (d < livingDist - 0.5) err += 1;
+    if (prefs.privacyOppositeEntry) {
+      // Extra penalty if bedroom hugs the entrance façade
+      const onEntryFace = touchesEntranceFacade(r, plan.entrance.direction, plan.outlineW, plan.outlineH);
+      if (onEntryFace) err += 0.5;
+    }
     n++;
   }
   return n > 0 ? err / n : 0;
+}
+
+function touchesEntranceFacade(
+  r: RoomRect,
+  dir: EntranceDirection,
+  W: number,
+  H: number,
+  eps = 0.2,
+): boolean {
+  switch (dir) {
+    case 'S': return r.y + r.h > H - eps;
+    case 'N': return r.y < eps;
+    case 'E': return r.x + r.w > W - eps;
+    case 'W': return r.x < eps;
+  }
 }
 
 function wetClusterScore(rooms: RoomRect[]): number {
@@ -301,11 +361,13 @@ function wetClusterScore(rooms: RoomRect[]): number {
   return varSum / wet.length / 100;
 }
 
-function shapePenalty(rooms: RoomRect[]): number {
+function shapePenalty(rooms: RoomRect[], maxAspect = 3): number {
+  const limit = Math.max(1.5, maxAspect);
   let p = 0;
   for (const r of rooms) {
+    if (r.category === 'CORRIDOR' || r.category === 'ENTRY' || r.category === 'FOYER') continue;
     const aspect = Math.max(r.w / r.h, r.h / r.w);
-    if (aspect > 3) p += aspect - 3;
+    if (aspect > limit) p += aspect - limit;
   }
   return p / Math.max(1, rooms.length);
 }

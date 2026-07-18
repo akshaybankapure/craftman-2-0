@@ -5,7 +5,13 @@ import { placeDoors } from './doors/placeDoors.ts';
 import { embedRooms, pickLayoutStyle, type LayoutStyle } from './embedding/embedRooms.ts';
 import { computeSharedWalls } from './geometry/sharedWalls.ts';
 import { buildPortalGraph, buildRoutes } from './graph/portalGraph.ts';
-import { compareLexico, lexicoScores, optimizeValidPlan } from './optimize/validPlanOptimizer.ts';
+import { lexicoScores, optimizeValidPlan } from './optimize/validPlanOptimizer.ts';
+import { DEFAULT_DESIGN_PREFS, type DesignPrefs } from './optimize/designPrefs.ts';
+import {
+  DEFAULT_METRIC_ORDER,
+  type MetricKey,
+  sortPlansByPriority,
+} from './optimize/metrics.ts';
 import { dedupePlans, geometricSimilarity } from './dedupe/planSignature.ts';
 import { generateAccessTree } from './topology/generateAccessTrees.ts';
 import { floorPlanToSolveProblem } from './toFloorGraph.ts';
@@ -25,6 +31,10 @@ export interface GenerateOptions {
   optimizeIterations?: number;
   doorConfig?: DoorConfig;
   baseSeed?: number;
+  /** Soft ranking priority (first = primary). Defaults to balanced lexico order. */
+  metricPriority?: MetricKey[];
+  /** User design preferences that parameterize soft scores. */
+  designPrefs?: DesignPrefs;
 }
 
 export interface GenerateResult {
@@ -50,6 +60,10 @@ export function generateFloorPlanOptions(
   const optimizeIterations = options.optimizeIterations ?? 40;
   const doorConfig = options.doorConfig ?? DEFAULT_DOOR_CONFIG;
   const baseSeed = options.baseSeed ?? 42;
+  const metricPriority = options.metricPriority?.length
+    ? options.metricPriority
+    : DEFAULT_METRIC_ORDER;
+  const designPrefs = options.designPrefs ?? DEFAULT_DESIGN_PREFS;
 
   const valid: FloorPlan[] = [];
   let attempts = 0;
@@ -77,16 +91,17 @@ export function generateFloorPlanOptions(
       if (!plan) continue;
       if (!plan.validation.valid) continue;
 
-      const optimized = optimizeValidPlan(plan, optimizeIterations);
+      const optimized = optimizeValidPlan(plan, optimizeIterations, designPrefs);
       if (optimized.validation.valid) {
+        const lex = lexicoScores(optimized, designPrefs);
         optimized.scores = {
-          areaError: lexicoScores(optimized)[0],
-          daylight: lexicoScores(optimized)[1],
-          privacy: lexicoScores(optimized)[2],
-          corridorEfficiency: lexicoScores(optimized)[3],
-          wetClustering: lexicoScores(optimized)[4],
-          shapeQuality: lexicoScores(optimized)[5],
-          lexico: lexicoScores(optimized),
+          areaError: lex[0],
+          daylight: lex[1],
+          privacy: lex[2],
+          corridorEfficiency: lex[3],
+          wetClustering: lex[4],
+          shapeQuality: lex[5],
+          lexico: lex,
         };
         valid.push(optimized);
       }
@@ -100,12 +115,10 @@ export function generateFloorPlanOptions(
 
   // Slightly looser geometric dedupe so creative variants survive
   const unique = dedupePlans(valid, 0.88);
-  unique.sort((a, b) =>
-    compareLexico(a.scores?.lexico ?? lexicoScores(a), b.scores?.lexico ?? lexicoScores(b)),
-  );
+  const ranked = sortPlansByPriority(unique, metricPriority);
 
   // Prefer a diverse retained set over the N most similar top scores
-  const plans = pickDiversePlans(unique, retain);
+  const plans = pickDiversePlans(ranked, retain, metricPriority);
 
   return {
     plans,
@@ -116,7 +129,11 @@ export function generateFloorPlanOptions(
 }
 
 /** Greedy diverse pick: take best, then farthest from already picked. */
-function pickDiversePlans(ranked: FloorPlan[], retain: number): FloorPlan[] {
+function pickDiversePlans(
+  ranked: FloorPlan[],
+  retain: number,
+  metricPriority: MetricKey[],
+): FloorPlan[] {
   if (ranked.length <= retain) return ranked;
   const picked: FloorPlan[] = [ranked[0]];
   const rest = ranked.slice(1);
@@ -135,11 +152,7 @@ function pickDiversePlans(ranked: FloorPlan[], retain: number): FloorPlan[] {
     }
     picked.push(rest.splice(bestIdx, 1)[0]);
   }
-  // Re-sort picked by quality for stable UI ordering
-  picked.sort((a, b) =>
-    compareLexico(a.scores?.lexico ?? lexicoScores(a), b.scores?.lexico ?? lexicoScores(b)),
-  );
-  return picked;
+  return sortPlansByPriority(picked, metricPriority);
 }
 
 export function generateOne(

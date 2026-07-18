@@ -4,6 +4,13 @@ import { polygonArea } from '../geometry/vec2';
 import type { EntranceDirection } from '../planner/ProgramBuilder';
 import type { FlowInfo } from '../optimizer/objectives';
 import type { FloorPlan } from '../planner/types';
+import {
+  type AreaUnitMode,
+  formatAreaCompact,
+  formatDimsCompact,
+  formatOutline,
+  unitModeLabel,
+} from '../planner/units';
 
 interface RoomColorDef {
   bg: string;
@@ -22,6 +29,8 @@ interface PlanViewer2DProps {
   /** Topology-first plan with physical doors / debug data. */
   floorPlan?: FloorPlan | null;
   showDebugOverlay?: boolean;
+  /** Display unit for room areas / dimensions on the plan. */
+  areaUnit?: AreaUnitMode;
 }
 
 const DEFAULT_COLORS: Record<string, RoomColorDef> = {
@@ -47,6 +56,7 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
   roomColors,
   floorPlan = null,
   showDebugOverlay = false,
+  areaUnit = 'm2',
 }) => {
   const colors = roomColors || DEFAULT_COLORS;
   const padding = 60;
@@ -195,17 +205,17 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
               x={cx} y={actualShowGraphOverlay ? cy + 26 : cy + 10}
               textAnchor="middle"
               fill="#94a3b8"
-              style={{ fontSize: '9px', fontWeight: 500 }}
+              style={{ fontSize: areaUnit === 'both' ? '8px' : '9px', fontWeight: 500 }}
             >
-              {area.toFixed(1)}m²
+              {formatAreaCompact(area, areaUnit)}
             </text>
             <text
               x={cx} y={actualShowGraphOverlay ? cy + 38 : cy + 22}
               textAnchor="middle"
               fill="#64748b"
-              style={{ fontSize: '7.5px' }}
+              style={{ fontSize: areaUnit === 'both' ? '6.5px' : '7.5px' }}
             >
-              {roomW.toFixed(1)}m × {roomH.toFixed(1)}m
+              {formatDimsCompact(roomW, roomH, areaUnit)}
             </text>
           </g>
         );
@@ -442,6 +452,35 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         />
         <circle cx={compassCx} cy={compassCy} r="2.5" fill="#ef4444" />
       </g>
+
+      {/* Unit legend — mirrors sidebar area unit selection */}
+      {(() => {
+        const boxW = areaUnit === 'both' ? 200 : 148;
+        const boxH = floorPlan ? 44 : 28;
+        const boxX = 20;
+        const boxY = height - boxH - 20;
+        return (
+          <g>
+            <rect
+              x={boxX}
+              y={boxY}
+              width={boxW}
+              height={boxH}
+              rx={8}
+              fill="rgba(12, 14, 18, 0.82)"
+              stroke="rgba(255,255,255,0.08)"
+            />
+            <text x={boxX + 12} y={boxY + 18} fill="#93c5fd" style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em' }}>
+              UNITS · {unitModeLabel(areaUnit)}
+            </text>
+            {floorPlan && (
+              <text x={boxX + 12} y={boxY + 34} fill="#64748b" style={{ fontSize: '9px', fontWeight: 500 }}>
+                Outline {formatOutline(floorPlan.outlineW, floorPlan.outlineH, areaUnit)}
+              </text>
+            )}
+          </g>
+        );
+      })()}
     </svg>
   );
 };
