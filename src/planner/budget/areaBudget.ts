@@ -104,16 +104,18 @@ export function programmeFromSpec(spec: ProgramSpec): {
   hasBalcony: boolean;
   hasFoyer: boolean;
 } {
-  const count = (t: string) =>
-    spec.rooms.filter(r => r.type === t).reduce((s, r) => s + r.count, 0);
+  const count = (...types: string[]) =>
+    spec.rooms
+      .filter(r => types.includes(r.type))
+      .reduce((s, r) => s + r.count, 0);
 
-  const bathrooms = count('bathroom') + count('ensuite');
+  const bathrooms = count('bathroom', 'ensuite');
   return {
-    bedrooms: count('bedroom'),
+    bedrooms: Math.max(1, count('bedroom')),
     bathrooms: Math.max(1, bathrooms),
-    hasUtility: count('utility') > 0 || count('storage') > 0,
+    hasUtility: count('utility', 'storage') > 0,
     hasBalcony: count('balcony') > 0,
-    hasFoyer: count('foyer') > 0 || spec.totalAreaTarget >= 60,
+    hasFoyer: count('foyer') > 0 || spec.totalAreaTarget >= 90,
   };
 }
 

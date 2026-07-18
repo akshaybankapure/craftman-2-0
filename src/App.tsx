@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Layers, Zap, Download, ChevronRight, ChevronLeft, Trophy, Activity,
-  GitCommit, Home, Settings, Box, Bug, Target, Sun, Ruler,
+  GitCommit, Home, Settings, Box, Bug, Target, Sun, Ruler, Building2, Trees, LayoutGrid,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlanViewer2D } from './components/PlanViewer2D';
@@ -24,8 +24,6 @@ import {
   sortPlansByPriority,
 } from './planner/optimize/metrics';
 import {
-  DEFAULT_DESIGN_PREFS,
-  cloneDesignPrefs,
   type DaylightRoomKind,
   type DesignPrefs,
 } from './planner/optimize/designPrefs';
@@ -39,96 +37,18 @@ import {
   m2ToSqft,
   sqftToM2,
 } from './planner/units';
-import type { ProgramSpec } from './types/index';
-
-// ─── BHK Presets ────────────────────────────────────────────────────────────
-type BHKType = '1 BHK' | '2 BHK' | '3 BHK' | '4 BHK';
-
-interface BHKPreset {
-  label: BHKType;
-  defaultArea: number;
-  rooms: ProgramSpec['rooms'];
-  adjacencies: ProgramSpec['adjacencies'];
-}
-
-const BHK_PRESETS: Record<BHKType, BHKPreset> = {
-  '1 BHK': {
-    label: '1 BHK',
-    defaultArea: 45,
-    rooms: [
-      { type: 'living', count: 1, targetArea: 14, minDimension: 3.0 },
-      { type: 'kitchen', count: 1, targetArea: 7, minDimension: 2.1 },
-      { type: 'bedroom', count: 1, targetArea: 12, minDimension: 2.7 },
-      { type: 'bathroom', count: 1, targetArea: 4, minDimension: 1.5 },
-      { type: 'corridor', count: 1, targetArea: 4, minDimension: 1.05 },
-      { type: 'entry', count: 1, targetArea: 3, minDimension: 1.2 },
-    ],
-    adjacencies: [
-      ['living', 'kitchen'],
-      ['living', 'corridor'],
-      ['bedroom', 'bathroom'],
-      ['corridor', 'entry'],
-      ['corridor', 'bedroom'],
-    ],
-  },
-  '2 BHK': {
-    label: '2 BHK',
-    defaultArea: 75,
-    rooms: [
-      { type: 'living', count: 1, targetArea: 18, minDimension: 3.0 },
-      { type: 'kitchen', count: 1, targetArea: 9, minDimension: 2.1 },
-      { type: 'bedroom', count: 2, targetArea: 12, minDimension: 2.7 },
-      { type: 'bathroom', count: 2, targetArea: 4, minDimension: 1.5 },
-      { type: 'corridor', count: 1, targetArea: 5, minDimension: 1.05 },
-      { type: 'entry', count: 1, targetArea: 3, minDimension: 1.2 },
-    ],
-    adjacencies: [
-      ['living', 'kitchen'],
-      ['living', 'corridor'],
-      ['bedroom', 'bathroom'],
-      ['corridor', 'entry'],
-      ['corridor', 'bedroom'],
-    ],
-  },
-  '3 BHK': {
-    label: '3 BHK',
-    defaultArea: 105,
-    rooms: [
-      { type: 'living', count: 1, targetArea: 22, minDimension: 3.5 },
-      { type: 'kitchen', count: 1, targetArea: 10, minDimension: 2.4 },
-      { type: 'bedroom', count: 3, targetArea: 13, minDimension: 2.7 },
-      { type: 'bathroom', count: 2, targetArea: 4.5, minDimension: 1.5 },
-      { type: 'corridor', count: 1, targetArea: 6, minDimension: 1.1 },
-      { type: 'entry', count: 1, targetArea: 3, minDimension: 1.2 },
-    ],
-    adjacencies: [
-      ['living', 'kitchen'],
-      ['living', 'corridor'],
-      ['bedroom', 'bathroom'],
-      ['corridor', 'entry'],
-      ['corridor', 'bedroom'],
-    ],
-  },
-  '4 BHK': {
-    label: '4 BHK',
-    defaultArea: 140,
-    rooms: [
-      { type: 'living', count: 1, targetArea: 28, minDimension: 4.0 },
-      { type: 'kitchen', count: 1, targetArea: 12, minDimension: 2.4 },
-      { type: 'bedroom', count: 4, targetArea: 14, minDimension: 2.7 },
-      { type: 'bathroom', count: 3, targetArea: 4.5, minDimension: 1.5 },
-      { type: 'corridor', count: 1, targetArea: 7, minDimension: 1.2 },
-      { type: 'entry', count: 1, targetArea: 3.5, minDimension: 1.2 },
-    ],
-    adjacencies: [
-      ['living', 'kitchen'],
-      ['living', 'corridor'],
-      ['bedroom', 'bathroom'],
-      ['corridor', 'entry'],
-      ['corridor', 'bedroom'],
-    ],
-  },
-};
+import {
+  BHK_OPTIONS,
+  TYPOLOGY_OPTIONS,
+  availableVariants,
+  defaultCarpetM2,
+  designPrefsForTypology,
+  programSpecFromTemplate,
+  resolveTemplate,
+  type BuildingTypology,
+  type TemplateVariant,
+} from './planner/typology';
+import { createDefaultUnitMix, resolveUnitMix } from './domain/unitMix';
 
 const ROOM_COLORS: Record<string, { bg: string; border: string; label: string }> = {
   living:   { bg: 'rgba(245, 158, 11, 0.12)', border: '#f59e0b', label: '#fbbf24' },
@@ -167,24 +87,44 @@ function buildPriority(primary: MetricKey, secondary: MetricKey[]): MetricKey[] 
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'2d' | '3d'>('2d');
-  const [bhkType, setBhkType] = useState<BHKType>('2 BHK');
+  const [typology, setTypology] = useState<BuildingTypology>('apartment');
+  const [bhk, setBhk] = useState<number>(2);
+  const [variant, setVariant] = useState<TemplateVariant>('standard');
   /** Always stored in m² — display converts via areaUnit */
-  const [carpetAreaM2, setCarpetAreaM2] = useState(75);
-  const [areaUnit, setAreaUnit] = useState<AreaUnitMode>('m2');
+  const [carpetAreaM2, setCarpetAreaM2] = useState(() =>
+    defaultCarpetM2('apartment', resolveTemplate(2, 'standard')),
+  );
+  const [areaUnit, setAreaUnit] = useState<AreaUnitMode>('sqft');
   const [entranceDir, setEntranceDir] = useState<EntranceDirection>('S');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showDesignPrefs, setShowDesignPrefs] = useState(true);
+  const [showDesignPrefs, setShowDesignPrefs] = useState(false);
+  const [showOptimize, setShowOptimize] = useState(false);
+  const [prefsFollowTypology, setPrefsFollowTypology] = useState(true);
   const [showGraphOverlay, setShowGraphOverlay] = useState(false);
   const [showDebugOverlay, setShowDebugOverlay] = useState(false);
   const [candidates, setCandidates] = useState<FloorPlan[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isSolving, setIsSolving] = useState(false);
-  const [telemetry, setTelemetry] = useState<string[]>(['[system] topology-first generator ready']);
+  const [telemetry, setTelemetry] = useState<string[]>(['[system] typology-first studio ready']);
   const [rankingPreset, setRankingPreset] = useState<RankingPresetId | 'custom'>('balanced');
   const [primaryMetric, setPrimaryMetric] = useState<MetricKey>('areaError');
   const [secondaryMetrics, setSecondaryMetrics] = useState<MetricKey[]>([]);
-  const [designPrefs, setDesignPrefs] = useState<DesignPrefs>(() => cloneDesignPrefs(DEFAULT_DESIGN_PREFS));
+  const [designPrefs, setDesignPrefs] = useState<DesignPrefs>(() =>
+    designPrefsForTypology('apartment', 'S', 'standard'),
+  );
   const debugEnabled = isDebugEnabled();
+
+  const template = useMemo(() => resolveTemplate(bhk, variant), [bhk, variant]);
+  const variants = useMemo(() => availableVariants(bhk), [bhk]);
+  const canGenerate = typology !== 'multi_unit';
+
+  const mixPreview = useMemo(() => {
+    try {
+      return resolveUnitMix(createDefaultUnitMix());
+    } catch {
+      return null;
+    }
+  }, []);
 
   const metricPriority = useMemo(
     () => (rankingPreset === 'custom'
@@ -203,26 +143,29 @@ const App: React.FC = () => {
     designPrefs.privacyOppositeEntry ? 1 : 0,
   ].join('|');
 
-  const spec = useMemo<ProgramSpec>(() => {
-    const preset = BHK_PRESETS[bhkType];
-    return {
-      totalAreaTarget: carpetAreaM2,
-      rooms: preset.rooms.map(r => ({ ...r })),
-      adjacencies: preset.adjacencies,
-    };
-  }, [bhkType, carpetAreaM2]);
+  // Keep design prefs synced to typology unless user customized
+  useEffect(() => {
+    if (!prefsFollowTypology) return;
+    setDesignPrefs(designPrefsForTypology(typology === 'multi_unit' ? 'apartment' : typology, entranceDir, variant));
+  }, [typology, entranceDir, variant, prefsFollowTypology]);
+
+  const spec = useMemo(
+    () => programSpecFromTemplate(template, carpetAreaM2, typology === 'multi_unit' ? 'apartment' : typology),
+    [template, carpetAreaM2, typology],
+  );
 
   const { outlineW, outlineH } = useMemo(() => {
-    const aspect = 1.3;
+    const aspect = typology === 'house' ? 1.15 : 1.3;
     const h = Math.sqrt(carpetAreaM2 / aspect);
     const w = carpetAreaM2 / h;
     return { outlineW: Math.round(w * 10) / 10, outlineH: Math.round(h * 10) / 10 };
-  }, [carpetAreaM2]);
+  }, [carpetAreaM2, typology]);
 
   const defaultPlan = useMemo(() => {
+    if (!canGenerate) return null;
     const { plan } = buildFromSpecTopologyFirst(spec, outlineW, outlineH, entranceDir, 42);
     return plan ? rescorePlan(plan, designPrefs) : plan;
-  }, [spec, outlineW, outlineH, entranceDir, prefsKey]);
+  }, [spec, outlineW, outlineH, entranceDir, prefsKey, canGenerate]);
 
   const activePlan = candidates.length > 0
     ? candidates[Math.min(selectedIndex, candidates.length - 1)]
@@ -240,7 +183,6 @@ const App: React.FC = () => {
     return flowInfoFromPlan(activePlan);
   }, [activePlan]);
 
-  // Rescore + re-rank when metric priority or design prefs change
   const priorityKey = metricPriority.join('|');
   useEffect(() => {
     if (candidates.length === 0) return;
@@ -252,27 +194,53 @@ const App: React.FC = () => {
       : 0;
     setCandidates(sorted);
     setSelectedIndex(nextIdx);
-    setTelemetry(prev => [
-      ...prev.slice(-5),
-      `[rank] ${metricDef(primaryKey).label} · prefs updated`,
-    ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [priorityKey, prefsKey]);
 
+  const carpetMax = typology === 'house' ? 250 : 200;
+
   const setCarpetFromM2 = (m2: number) => {
-    setCarpetAreaM2(Math.max(30, Math.min(200, Math.round(m2))));
+    setCarpetAreaM2(Math.max(28, Math.min(carpetMax, Math.round(m2))));
     setCandidates([]);
   };
 
-  const handleBHKChange = (type: BHKType) => {
-    setBhkType(type);
-    setCarpetAreaM2(BHK_PRESETS[type].defaultArea);
+  const applyTypology = (next: BuildingTypology) => {
+    setTypology(next);
     setCandidates([]);
-    setTelemetry(prev => [...prev.slice(-5), `[config] switched to ${type} preset`]);
+    const t = resolveTemplate(bhk, variant);
+    const carpet = defaultCarpetM2(next === 'multi_unit' ? 'apartment' : next, t);
+    setCarpetAreaM2(carpet);
+    setPrefsFollowTypology(true);
+    setTelemetry(prev => [...prev.slice(-5), `[typology] ${next.replace('_', ' ')}`]);
+  };
+
+  const applyBhk = (next: number) => {
+    setBhk(next);
+    const vars = availableVariants(next);
+    const nextVariant = vars.includes(variant) ? variant : vars[0] ?? 'standard';
+    setVariant(nextVariant);
+    const t = resolveTemplate(next, nextVariant);
+    setCarpetAreaM2(defaultCarpetM2(typology === 'multi_unit' ? 'apartment' : typology, t));
+    setCandidates([]);
+    setPrefsFollowTypology(true);
+    setTelemetry(prev => [...prev.slice(-5), `[config] ${next} BHK · ${nextVariant}`]);
+  };
+
+  const applyVariant = (next: TemplateVariant) => {
+    setVariant(next);
+    const t = resolveTemplate(bhk, next);
+    setCarpetAreaM2(defaultCarpetM2(typology === 'multi_unit' ? 'apartment' : typology, t));
+    setCandidates([]);
+    setPrefsFollowTypology(true);
+  };
+
+  const touchDesignPrefs = (updater: (p: DesignPrefs) => DesignPrefs) => {
+    setPrefsFollowTypology(false);
+    setDesignPrefs(updater);
   };
 
   const toggleDaylightFacade = (dir: EntranceDirection) => {
-    setDesignPrefs(prev => {
+    touchDesignPrefs(prev => {
       const has = prev.daylightFacades.includes(dir);
       return {
         ...prev,
@@ -284,7 +252,7 @@ const App: React.FC = () => {
   };
 
   const toggleDaylightRoom = (kind: DaylightRoomKind) => {
-    setDesignPrefs(prev => {
+    touchDesignPrefs(prev => {
       const has = prev.daylightRooms.includes(kind);
       if (has && prev.daylightRooms.length <= 1) return prev;
       return {
@@ -329,10 +297,14 @@ const App: React.FC = () => {
   };
 
   const runGenerate = (selectBest: boolean) => {
+    if (!canGenerate) {
+      setTelemetry(prev => [...prev, '[info] multi-unit floor plates coming next — pick Apartment or House for now']);
+      return;
+    }
     setIsSolving(true);
     setTelemetry(prev => [
       ...prev,
-      `[topo] generating ${bhkType} · optimize for ${metricDef(primaryKey).label}`,
+      `[topo] ${typology} · ${template.name} · ${metricDef(primaryKey).label}`,
     ]);
 
     setTimeout(() => {
@@ -425,73 +397,149 @@ const App: React.FC = () => {
 
         <div className="sidebar-scroll">
           <div className="section">
-            <p className="section-label">Apartment type</p>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {(['1 BHK', '2 BHK', '3 BHK', '4 BHK'] as BHKType[]).map(t => (
-                <button
-                  key={t}
-                  type="button"
-                  className={`seg-btn${bhkType === t ? ' active' : ''}`}
-                  onClick={() => handleBHKChange(t)}
-                >
-                  {t}
-                </button>
-              ))}
+            <p className="section-label">Building type</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {TYPOLOGY_OPTIONS.map(opt => {
+                const Icon = opt.id === 'apartment' ? Building2 : opt.id === 'house' ? Trees : LayoutGrid;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`seg-btn${typology === opt.id ? ' active' : ''}`}
+                    onClick={() => applyTypology(opt.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 10,
+                      textAlign: 'left',
+                      padding: '10px 12px',
+                      opacity: opt.available || typology === opt.id ? 1 : 0.85,
+                    }}
+                  >
+                    <Icon size={16} style={{ marginTop: 2, flexShrink: 0 }} />
+                    <span>
+                      <span style={{ display: 'block', fontWeight: 600, fontSize: '0.8rem' }}>
+                        {opt.label}
+                        {!opt.available && (
+                          <span style={{ marginLeft: 6, fontSize: '0.62rem', color: '#fbbf24', fontWeight: 600 }}>SOON</span>
+                        )}
+                      </span>
+                      <span style={{ display: 'block', fontSize: '0.65rem', color: '#64748b', fontWeight: 400, marginTop: 2 }}>
+                        {opt.hint}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          <div className="section">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <p className="section-label" style={{ marginBottom: 0 }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <Ruler size={11} /> Carpet area
-                </span>
+          {typology === 'multi_unit' ? (
+            <div className="section">
+              <p className="section-label">Unit mix preview</p>
+              <p className="section-hint" style={{ marginBottom: 10 }}>
+                Multi-unit floor plates need a dedicated packer (core + unit slots). Preview of a typical Indian mix:
               </p>
-              <div className="chip-row">
-                {AREA_UNIT_OPTIONS.map(u => (
-                  <button
-                    key={u.id}
-                    type="button"
-                    className={`chip${areaUnit === u.id ? ' primary' : ''}`}
-                    onClick={() => setAreaUnit(u.id)}
-                    style={{ padding: '4px 8px', fontSize: '0.68rem' }}
-                  >
-                    {u.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <input
-                type="range"
-                min={30}
-                max={200}
-                step={5}
-                value={carpetAreaM2}
-                onChange={e => setCarpetFromM2(parseInt(e.target.value, 10))}
-                style={{ flex: 1 }}
-              />
-              <input
-                type="number"
-                min={areaUnit === 'sqft' ? 320 : 30}
-                max={areaUnit === 'sqft' ? 2150 : 200}
-                step={areaUnit === 'sqft' ? 10 : 1}
-                value={carpetInputValue}
-                onChange={e => onCarpetNumberChange(parseFloat(e.target.value) || (areaUnit === 'sqft' ? 800 : 75))}
-                style={{ ...inputStyle, width: areaUnit === 'both' ? 64 : 78, textAlign: 'center' }}
-              />
-            </div>
-            <p className="section-hint">
-              {areaUnit === 'm2' && <>{carpetAreaM2} m² · outline {formatOutline(outlineW, outlineH, 'm2')}</>}
-              {areaUnit === 'sqft' && <>{Math.round(m2ToSqft(carpetAreaM2))} sq.ft. · outline {formatOutline(outlineW, outlineH, 'sqft')}</>}
-              {areaUnit === 'both' && (
+              {mixPreview && (
                 <>
-                  {formatArea(carpetAreaM2, 'both')} · {formatOutline(outlineW, outlineH, 'both')}
+                  {mixPreview.entries.map(e => (
+                    <div key={e.template.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: 6, color: '#cbd5e1' }}>
+                      <span>{e.count}× {e.template.name}</span>
+                      <span style={{ color: '#64748b' }}>{formatArea(e.carpetAreaPerUnit, areaUnit)}</span>
+                    </div>
+                  ))}
+                  <p className="section-hint" style={{ marginTop: 8 }}>
+                    Floor carpet ~{formatArea(mixPreview.totals.totalCarpetArea, areaUnit)} · efficiency {(mixPreview.totals.carpetEfficiency * 100).toFixed(0)}%
+                  </p>
                 </>
               )}
-            </p>
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="section">
+                <p className="section-label">Programme · {template.name}</p>
+                <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                  {BHK_OPTIONS.map(n => (
+                    <button
+                      key={n}
+                      type="button"
+                      className={`seg-btn${bhk === n ? ' active' : ''}`}
+                      onClick={() => applyBhk(n)}
+                    >
+                      {n} BHK
+                    </button>
+                  ))}
+                </div>
+                <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
+                  MARKET TIER
+                </p>
+                <div className="chip-row">
+                  {variants.map(v => (
+                    <button
+                      key={v}
+                      type="button"
+                      className={`chip${variant === v ? ' primary' : ''}`}
+                      onClick={() => applyVariant(v)}
+                      style={{ textTransform: 'capitalize' }}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
+                <p className="section-hint">{template.description}</p>
+              </div>
 
+              <div className="section">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <p className="section-label" style={{ marginBottom: 0 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <Ruler size={11} /> Carpet area
+                    </span>
+                  </p>
+                  <div className="chip-row">
+                    {AREA_UNIT_OPTIONS.map(u => (
+                      <button
+                        key={u.id}
+                        type="button"
+                        className={`chip${areaUnit === u.id ? ' primary' : ''}`}
+                        onClick={() => setAreaUnit(u.id)}
+                        style={{ padding: '4px 8px', fontSize: '0.68rem' }}
+                      >
+                        {u.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <input
+                    type="range"
+                    min={template.carpetAreaRange.min}
+                    max={carpetMax}
+                    step={5}
+                    value={carpetAreaM2}
+                    onChange={e => setCarpetFromM2(parseInt(e.target.value, 10))}
+                    style={{ flex: 1 }}
+                  />
+                  <input
+                    type="number"
+                    min={areaUnit === 'sqft' ? Math.round(m2ToSqft(28)) : 28}
+                    max={areaUnit === 'sqft' ? Math.round(m2ToSqft(carpetMax)) : carpetMax}
+                    step={areaUnit === 'sqft' ? 10 : 1}
+                    value={carpetInputValue}
+                    onChange={e => onCarpetNumberChange(parseFloat(e.target.value) || carpetAreaM2)}
+                    style={{ ...inputStyle, width: areaUnit === 'both' ? 64 : 78, textAlign: 'center' }}
+                  />
+                </div>
+                <p className="section-hint">
+                  Typical {formatArea(template.carpetAreaRange.min, areaUnit, 0)}–{formatArea(template.carpetAreaRange.max, areaUnit, 0)}
+                  {' · '}
+                  outline {formatOutline(outlineW, outlineH, areaUnit)}
+                </p>
+              </div>
+            </>
+          )}
+
+          {typology !== 'multi_unit' && (
           <div className="section">
             <p className="section-label">Entrance</p>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
@@ -502,8 +550,8 @@ const App: React.FC = () => {
                 gridTemplateRows: '36px 36px 36px',
                 gap: 3,
               }}>
-                <button type="button" onClick={() => { setEntranceDir('N'); setCandidates([]); }} style={{ ...dirBtnStyle('N'), gridArea: 'n' }}>N</button>
-                <button type="button" onClick={() => { setEntranceDir('W'); setCandidates([]); }} style={{ ...dirBtnStyle('W'), gridArea: 'w' }}>W</button>
+                <button type="button" onClick={() => { setEntranceDir('N'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('N'), gridArea: 'n' }}>N</button>
+                <button type="button" onClick={() => { setEntranceDir('W'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('W'), gridArea: 'w' }}>W</button>
                 <div style={{
                   gridArea: 'c',
                   display: 'flex',
@@ -515,8 +563,8 @@ const App: React.FC = () => {
                 }}>
                   <Home size={14} color="#64748b" />
                 </div>
-                <button type="button" onClick={() => { setEntranceDir('E'); setCandidates([]); }} style={{ ...dirBtnStyle('E'), gridArea: 'e' }}>E</button>
-                <button type="button" onClick={() => { setEntranceDir('S'); setCandidates([]); }} style={{ ...dirBtnStyle('S'), gridArea: 's' }}>S</button>
+                <button type="button" onClick={() => { setEntranceDir('E'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('E'), gridArea: 'e' }}>E</button>
+                <button type="button" onClick={() => { setEntranceDir('S'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('S'), gridArea: 's' }}>S</button>
               </div>
               <div style={{ flex: 1 }}>
                 <p style={{ color: '#e2e8f0', fontSize: '0.85rem', fontWeight: 600 }}>
@@ -528,188 +576,217 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
+          )}
 
-          {/* Design preferences — parameterize soft metrics */}
-          <div className="section">
-            <button
-              type="button"
-              onClick={() => setShowDesignPrefs(v => !v)}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                background: 'transparent',
-                border: 'none',
-                color: 'inherit',
-                cursor: 'pointer',
-                padding: 0,
-                marginBottom: showDesignPrefs ? 10 : 0,
-                fontFamily: 'inherit',
-              }}
-            >
-              <p className="section-label" style={{ marginBottom: 0 }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <Sun size={11} /> Design preferences
-                </span>
-              </p>
-              <span style={{ color: '#64748b', fontSize: '0.65rem' }}>{showDesignPrefs ? 'Hide' : 'Show'}</span>
-            </button>
+          {typology !== 'multi_unit' && (
+            <>
+              {/* Design preferences — auto from typology; advanced override */}
+              <div className="section">
+                <button
+                  type="button"
+                  onClick={() => setShowDesignPrefs(v => !v)}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    padding: 0,
+                    marginBottom: showDesignPrefs ? 10 : 0,
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <p className="section-label" style={{ marginBottom: 0 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <Sun size={11} /> Design preferences
+                    </span>
+                  </p>
+                  <span style={{ color: '#64748b', fontSize: '0.65rem' }}>{showDesignPrefs ? 'Hide' : 'Auto'}</span>
+                </button>
+                {!showDesignPrefs && (
+                  <p className="section-hint">
+                    {prefsFollowTypology
+                      ? `Auto from ${typology === 'house' ? 'house' : 'apartment'} · light on ${designPrefs.daylightFacades.join('/')} · corridor ≤ ${(designPrefs.maxCorridorRatio * 100).toFixed(0)}%`
+                      : 'Custom overrides active'}
+                  </p>
+                )}
 
-            {showDesignPrefs && (
-              <>
-                <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
-                  DAYLIGHT FAÇADES
-                </p>
-                <div className="chip-row" style={{ marginBottom: 4 }}>
-                  {(['N', 'E', 'S', 'W'] as EntranceDirection[]).map(d => (
+                {showDesignPrefs && (
+                  <>
+                    {prefsFollowTypology ? (
+                      <p className="section-hint" style={{ marginBottom: 10 }}>Editing any control switches to custom.</p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="chip active"
+                        style={{ marginBottom: 10, borderRadius: 8, width: '100%' }}
+                        onClick={() => setPrefsFollowTypology(true)}
+                      >
+                        Reset to typology defaults
+                      </button>
+                    )}
+                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
+                      DAYLIGHT FAÇADES
+                    </p>
+                    <div className="chip-row" style={{ marginBottom: 4 }}>
+                      {(['N', 'E', 'S', 'W'] as EntranceDirection[]).map(d => (
+                        <button
+                          key={d}
+                          type="button"
+                          className={`chip${designPrefs.daylightFacades.includes(d) ? ' primary' : ''}`}
+                          onClick={() => toggleDaylightFacade(d)}
+                        >
+                          {d}
+                        </button>
+                      ))}
+                    </div>
+                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', margin: '12px 0 8px' }}>
+                      ROOMS NEEDING LIGHT
+                    </p>
+                    <div className="chip-row" style={{ marginBottom: 12 }}>
+                      {([
+                        { id: 'LIVING' as DaylightRoomKind, label: 'Living' },
+                        { id: 'BEDROOM' as DaylightRoomKind, label: 'Bedroom' },
+                        { id: 'KITCHEN' as DaylightRoomKind, label: 'Kitchen' },
+                      ]).map(r => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          className={`chip${designPrefs.daylightRooms.includes(r.id) ? ' active' : ''}`}
+                          onClick={() => toggleDaylightRoom(r.id)}
+                        >
+                          {r.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
+                      MAX ROOM ASPECT · {designPrefs.maxAspectRatio.toFixed(1)}:1
+                    </p>
+                    <input
+                      type="range"
+                      min={2}
+                      max={4}
+                      step={0.1}
+                      value={designPrefs.maxAspectRatio}
+                      onChange={e => touchDesignPrefs(p => ({ ...p, maxAspectRatio: parseFloat(e.target.value) }))}
+                      style={{ width: '100%', marginBottom: 12 }}
+                    />
+                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
+                      MAX CORRIDOR · {(designPrefs.maxCorridorRatio * 100).toFixed(0)}% of carpet
+                    </p>
+                    <input
+                      type="range"
+                      min={0.06}
+                      max={0.18}
+                      step={0.01}
+                      value={designPrefs.maxCorridorRatio}
+                      onChange={e => touchDesignPrefs(p => ({ ...p, maxCorridorRatio: parseFloat(e.target.value) }))}
+                      style={{ width: '100%', marginBottom: 12 }}
+                    />
                     <button
-                      key={d}
                       type="button"
-                      className={`chip${designPrefs.daylightFacades.includes(d) ? ' primary' : ''}`}
-                      onClick={() => toggleDaylightFacade(d)}
-                      title={`Prefer daylight on ${DIRECTION_LABELS[d]} façade`}
+                      className={`chip${designPrefs.privacyOppositeEntry ? ' primary' : ''}`}
+                      onClick={() => touchDesignPrefs(p => ({ ...p, privacyOppositeEntry: !p.privacyOppositeEntry }))}
+                      style={{ width: '100%', borderRadius: 8 }}
                     >
-                      {d}
+                      Keep bedrooms off entrance façade
                     </button>
-                  ))}
-                </div>
-                <p className="section-hint" style={{ marginTop: 4, marginBottom: 12 }}>
-                  {designPrefs.daylightFacades.length === 0
-                    ? 'Any exterior wall counts for daylight.'
-                    : `Prefer ${designPrefs.daylightFacades.map(d => DIRECTION_LABELS[d]).join(', ')} exposure.`}
-                </p>
+                  </>
+                )}
+              </div>
 
-                <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
-                  ROOMS NEEDING LIGHT
-                </p>
-                <div className="chip-row" style={{ marginBottom: 12 }}>
-                  {([
-                    { id: 'LIVING' as DaylightRoomKind, label: 'Living' },
-                    { id: 'BEDROOM' as DaylightRoomKind, label: 'Bedroom' },
-                    { id: 'KITCHEN' as DaylightRoomKind, label: 'Kitchen' },
-                  ]).map(r => (
-                    <button
-                      key={r.id}
-                      type="button"
-                      className={`chip${designPrefs.daylightRooms.includes(r.id) ? ' active' : ''}`}
-                      onClick={() => toggleDaylightRoom(r.id)}
-                    >
-                      {r.label}
-                    </button>
-                  ))}
-                </div>
-
-                <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
-                  MAX ROOM ASPECT · {designPrefs.maxAspectRatio.toFixed(1)}:1
-                </p>
-                <input
-                  type="range"
-                  min={2}
-                  max={4}
-                  step={0.1}
-                  value={designPrefs.maxAspectRatio}
-                  onChange={e => setDesignPrefs(p => ({ ...p, maxAspectRatio: parseFloat(e.target.value) }))}
-                  style={{ width: '100%', marginBottom: 12 }}
-                />
-
-                <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
-                  MAX CORRIDOR · {(designPrefs.maxCorridorRatio * 100).toFixed(0)}% of carpet
-                </p>
-                <input
-                  type="range"
-                  min={0.06}
-                  max={0.18}
-                  step={0.01}
-                  value={designPrefs.maxCorridorRatio}
-                  onChange={e => setDesignPrefs(p => ({ ...p, maxCorridorRatio: parseFloat(e.target.value) }))}
-                  style={{ width: '100%', marginBottom: 12 }}
-                />
-
+              <div className="section">
                 <button
                   type="button"
-                  className={`chip${designPrefs.privacyOppositeEntry ? ' primary' : ''}`}
-                  onClick={() => setDesignPrefs(p => ({ ...p, privacyOppositeEntry: !p.privacyOppositeEntry }))}
-                  style={{ width: '100%', borderRadius: 8 }}
+                  onClick={() => setShowOptimize(v => !v)}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    padding: 0,
+                    marginBottom: showOptimize ? 10 : 0,
+                    fontFamily: 'inherit',
+                  }}
                 >
-                  Keep bedrooms off entrance façade
+                  <p className="section-label" style={{ marginBottom: 0 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <Target size={11} /> Optimize for
+                    </span>
+                  </p>
+                  <span style={{ color: '#64748b', fontSize: '0.65rem' }}>
+                    {showOptimize ? 'Hide' : metricDef(primaryKey).short}
+                  </span>
                 </button>
-                <p className="section-hint">
-                  These inputs drive Light, Shape, Circ., and Privacy scores — not hard constraints. Regenerate for new geometry; current options re-score live.
-                </p>
-              </>
-            )}
-          </div>
+                {!showOptimize && (
+                  <p className="section-hint">{activePresetHint}</p>
+                )}
+                {showOptimize && (
+                  <>
+                    <div className="chip-row" style={{ marginBottom: 10 }}>
+                      {RANKING_PRESETS.map(p => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          className={`chip${rankingPreset === p.id ? ' primary' : ''}`}
+                          onClick={() => applyPreset(p.id)}
+                          title={p.hint}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="chip-row">
+                      {METRIC_DEFS.map(m => (
+                        <button
+                          key={m.key}
+                          type="button"
+                          className={`chip${primaryMetric === m.key || (rankingPreset !== 'custom' && primaryKey === m.key) ? ' primary' : ''}`}
+                          onClick={() => selectPrimaryMetric(m.key)}
+                          title={m.hint}
+                        >
+                          {m.short}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="section-hint" style={{ marginTop: 8 }}>Secondary priorities:</p>
+                    <div className="chip-row">
+                      {METRIC_DEFS.filter(m => m.key !== primaryKey).map(m => {
+                        const on = secondaryMetrics.includes(m.key);
+                        return (
+                          <button
+                            key={m.key}
+                            type="button"
+                            className={`chip${on ? ' active' : ''}`}
+                            onClick={() => toggleSecondary(m.key)}
+                          >
+                            {on ? `${secondaryMetrics.indexOf(m.key) + 2}. ` : ''}{m.short}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
 
-          {/* Ranking metrics */}
-          <div className="section">
-            <p className="section-label">
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <Target size={11} /> Optimize for
-              </span>
-            </p>
-            <div className="chip-row" style={{ marginBottom: 10 }}>
-              {RANKING_PRESETS.map(p => (
-                <button
-                  key={p.id}
-                  type="button"
-                  className={`chip${rankingPreset === p.id ? ' primary' : ''}`}
-                  onClick={() => applyPreset(p.id)}
-                  title={p.hint}
-                >
-                  {p.label}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button type="button" onClick={handleGenerativeRun} disabled={isSolving || !canGenerate} className="btn-primary">
+                  {isSolving ? 'Generating layouts…' : 'Generate options'}
                 </button>
-              ))}
-            </div>
-
-            <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
-              PRIMARY METRIC
-            </p>
-            <div className="chip-row">
-              {METRIC_DEFS.map(m => (
-                <button
-                  key={m.key}
-                  type="button"
-                  className={`chip${primaryMetric === m.key || (rankingPreset !== 'custom' && primaryKey === m.key) ? ' primary' : ''}`}
-                  onClick={() => selectPrimaryMetric(m.key)}
-                  title={m.hint}
-                >
-                  {m.short}
+                <button type="button" onClick={handleSelectBest} disabled={isSolving || !canGenerate} className="btn-secondary">
+                  <Activity size={14} />
+                  Select best by {metricDef(primaryKey).short}
                 </button>
-              ))}
-            </div>
-
-            <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', margin: '12px 0 8px' }}>
-              THEN PRIORITIZE
-            </p>
-            <div className="chip-row">
-              {METRIC_DEFS.filter(m => m.key !== primaryKey).map(m => {
-                const on = secondaryMetrics.includes(m.key);
-                return (
-                  <button
-                    key={m.key}
-                    type="button"
-                    className={`chip${on ? ' active' : ''}`}
-                    onClick={() => toggleSecondary(m.key)}
-                    title={m.hint}
-                  >
-                    {on ? `${secondaryMetrics.indexOf(m.key) + 2}. ` : ''}{m.short}
-                  </button>
-                );
-              })}
-            </div>
-            <p className="section-hint">{activePresetHint}. Changing metrics re-ranks current options.</p>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <button type="button" onClick={handleGenerativeRun} disabled={isSolving} className="btn-primary">
-              {isSolving ? 'Generating layouts…' : 'Generate options'}
-            </button>
-            <button type="button" onClick={handleSelectBest} disabled={isSolving} className="btn-secondary">
-              <Activity size={14} />
-              Select best by {metricDef(primaryKey).short}
-            </button>
-          </div>
+              </div>
+            </>
+          )}
 
           {candidates.length > 0 && (
             <div className="section">
@@ -856,7 +933,19 @@ const App: React.FC = () => {
         <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <AnimatePresence mode="wait">
             <motion.div key={activeTab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.25 }} style={{ width: '100%', height: '100%' }}>
-              {activeTab === '2d' ? (
+              {typology === 'multi_unit' ? (
+                <div style={{
+                  width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: '#94a3b8', flexDirection: 'column', gap: 12, padding: 40, textAlign: 'center',
+                }}>
+                  <LayoutGrid size={40} color="#64748b" />
+                  <p style={{ fontSize: '1.1rem', fontWeight: 600, color: '#e2e8f0' }}>Multi-unit floor plates</p>
+                  <p style={{ maxWidth: 420, fontSize: '0.85rem', lineHeight: 1.5 }}>
+                    Unit-mix math is ready. Layout generation (shared core + multiple units) is next.
+                    Switch to Apartment or House to generate a single dwelling now.
+                  </p>
+                </div>
+              ) : activeTab === '2d' && activePlan ? (
                 <PlanViewer2D
                   graph={activeGraph}
                   width={window.innerWidth - 380}
@@ -869,8 +958,10 @@ const App: React.FC = () => {
                   showDebugOverlay={showDebugOverlay && debugEnabled}
                   areaUnit={areaUnit}
                 />
-              ) : (
+              ) : activeTab === '3d' && activePlan ? (
                 <MassingViewer3D graph={activeGraph} />
+              ) : (
+                <div style={{ color: '#64748b' }}>No plan yet — generate options</div>
               )}
             </motion.div>
           </AnimatePresence>
