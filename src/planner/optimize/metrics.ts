@@ -83,33 +83,52 @@ export function metricIndex(key: MetricKey): number {
   return metricDef(key).index;
 }
 
-/** Reorder a full lexico vector so `priority` keys come first. */
-export function scoresForPriority(lexico: number[], priority: MetricKey[]): number[] {
+/** Reorder a full lexico vector so `priority` keys come first.
+ *  Optional weights scale each metric before comparison (weighted
+ *  lexicographic) — a weight > 1 makes a metric more decisive. */
+export function scoresForPriority(
+  lexico: number[],
+  priority: MetricKey[],
+  weights?: Record<MetricKey, number>,
+): number[] {
   const order = priority.length > 0 ? priority : DEFAULT_METRIC_ORDER;
   const used = new Set(order.map(metricIndex));
-  const head = order.map(k => lexico[metricIndex(k)] ?? 0);
+  const w = (k: MetricKey) => weights?.[k] ?? 1;
+  const head = order.map(k => (lexico[metricIndex(k)] ?? 0) * w(k));
   const tail: number[] = [];
   for (let i = 0; i < lexico.length; i++) {
-    if (!used.has(i)) tail.push(lexico[i] ?? 0);
+    if (!used.has(i)) {
+      const key = METRIC_DEFS.find(m => m.index === i)?.key;
+      tail.push((lexico[i] ?? 0) * (key ? w(key) : 1));
+    }
   }
   return [...head, ...tail];
 }
 
-export function planPriorityScores(plan: FloorPlan, priority: MetricKey[]): number[] {
+export function planPriorityScores(
+  plan: FloorPlan,
+  priority: MetricKey[],
+  weights?: Record<MetricKey, number>,
+): number[] {
   const lex = plan.scores?.lexico ?? lexicoScores(plan);
-  return scoresForPriority(lex, priority);
+  return scoresForPriority(lex, priority, weights);
 }
 
 export function compareByPriority(
   a: FloorPlan,
   b: FloorPlan,
   priority: MetricKey[],
+  weights?: Record<MetricKey, number>,
 ): number {
-  return compareLexico(planPriorityScores(a, priority), planPriorityScores(b, priority));
+  return compareLexico(planPriorityScores(a, priority, weights), planPriorityScores(b, priority, weights));
 }
 
-export function sortPlansByPriority(plans: FloorPlan[], priority: MetricKey[]): FloorPlan[] {
-  return [...plans].sort((a, b) => compareByPriority(a, b, priority));
+export function sortPlansByPriority(
+  plans: FloorPlan[],
+  priority: MetricKey[],
+  weights?: Record<MetricKey, number>,
+): FloorPlan[] {
+  return [...plans].sort((a, b) => compareByPriority(a, b, priority, weights));
 }
 
 /** Human-readable score (0–100 quality; higher better for display). */

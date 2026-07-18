@@ -33,7 +33,9 @@ export interface GenerateOptions {
   baseSeed?: number;
   /** Soft ranking priority (first = primary). Defaults to balanced lexico order. */
   metricPriority?: MetricKey[];
-  /** User design preferences that parameterize soft scores. */
+  /** Per-metric weights applied before lexicographic comparison. */
+  metricWeights?: Record<MetricKey, number>;
+  /** Soft-scoring parameters — normally derived from a ResolvedStrategy. */
   designPrefs?: DesignPrefs;
 }
 
@@ -63,6 +65,7 @@ export function generateFloorPlanOptions(
   const metricPriority = options.metricPriority?.length
     ? options.metricPriority
     : DEFAULT_METRIC_ORDER;
+  const metricWeights = options.metricWeights;
   const designPrefs = options.designPrefs ?? DEFAULT_DESIGN_PREFS;
 
   const valid: FloorPlan[] = [];
@@ -91,7 +94,7 @@ export function generateFloorPlanOptions(
       if (!plan) continue;
       if (!plan.validation.valid) continue;
 
-      const optimized = optimizeValidPlan(plan, optimizeIterations, designPrefs);
+      const optimized = optimizeValidPlan(plan, optimizeIterations, designPrefs, metricPriority, metricWeights);
       if (optimized.validation.valid) {
         const lex = lexicoScores(optimized, designPrefs);
         optimized.scores = {
@@ -115,10 +118,10 @@ export function generateFloorPlanOptions(
 
   // Slightly looser geometric dedupe so creative variants survive
   const unique = dedupePlans(valid, 0.88);
-  const ranked = sortPlansByPriority(unique, metricPriority);
+  const ranked = sortPlansByPriority(unique, metricPriority, metricWeights);
 
   // Prefer a diverse retained set over the N most similar top scores
-  const plans = pickDiversePlans(ranked, retain, metricPriority);
+  const plans = pickDiversePlans(ranked, retain, metricPriority, metricWeights);
 
   return {
     plans,
@@ -133,6 +136,7 @@ function pickDiversePlans(
   ranked: FloorPlan[],
   retain: number,
   metricPriority: MetricKey[],
+  metricWeights?: Record<MetricKey, number>,
 ): FloorPlan[] {
   if (ranked.length <= retain) return ranked;
   const picked: FloorPlan[] = [ranked[0]];
@@ -152,7 +156,7 @@ function pickDiversePlans(
     }
     picked.push(rest.splice(bestIdx, 1)[0]);
   }
-  return sortPlansByPriority(picked, metricPriority);
+  return sortPlansByPriority(picked, metricPriority, metricWeights);
 }
 
 export function generateOne(

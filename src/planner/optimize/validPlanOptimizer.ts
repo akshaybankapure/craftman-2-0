@@ -7,6 +7,7 @@ import { buildPortalGraph, buildRoutes } from '../graph/portalGraph.ts';
 import { RNG } from '../rng.ts';
 import { budgetFor } from '../budget/areaBudget.ts';
 import { DEFAULT_DESIGN_PREFS, isDaylightCategory, type DesignPrefs } from './designPrefs.ts';
+import { scoresForPriority, type MetricKey } from './metrics.ts';
 
 /**
  * Lexicographic scores (lower better). P1 validity is gated before calling this.
@@ -26,7 +27,7 @@ export function lexicoScores(plan: FloorPlan, prefs: DesignPrefs = DEFAULT_DESIG
   const privacy = privacyGradientError(plan, prefs);
   const corridorEff = corridorScore(plan, prefs);
   const wet = wetClusterScore(rooms);
-  const shape = shapePenalty(rooms, prefs.maxAspectRatio);
+  const shape = shapePenalty(rooms, prefs);
   const balance = centroidBalance(rooms, plan.outlineW, plan.outlineH);
 
   return [areaErr, daylight, privacy, corridorEff, wet, shape, balance];
@@ -52,13 +53,23 @@ export function compareLexico(a: number[], b: number[]): number {
 /**
  * Simulated annealing over valid geometry transforms only.
  * Rejects immediately if validation fails after mutation.
+ * When `priority` / `weights` are given (from the resolved strategy),
+ * acceptance uses the same weighted lexicographic order as ranking, so
+ * generation genuinely optimises what the strategy says matters.
  */
 export function optimizeValidPlan(
   plan: FloorPlan,
   iterations = 80,
   prefs: DesignPrefs = DEFAULT_DESIGN_PREFS,
+  priority?: MetricKey[],
+  weights?: Record<MetricKey, number>,
 ): FloorPlan {
   if (!plan.validation.valid) return plan;
+  const order = priority?.length ? priority : undefined;
+  const cmp = (a: number[], b: number[]) =>
+    order || weights
+      ? compareLexico(scoresForPriority(a, order ?? [], weights), scoresForPriority(b, order ?? [], weights))
+      : compareLexico(a, b);
   const rng = new RNG(plan.seed ^ 0x9e3779b9);
   let current = clonePlan(plan);
   current.scores = { ...scorePack(current, prefs) };
@@ -75,10 +86,10 @@ export function optimizeValidPlan(
       continue;
     }
     candidate.scores = scorePack(candidate, prefs);
-    const d = compareLexico(candidate.scores.lexico, current.scores!.lexico);
+    const d = cmp(candidate.scores.lexico, current.scores!.lexico);
     if (d < 0 || rng.next() < Math.exp(-d / Math.max(1e-6, T))) {
       current = candidate;
-      if (compareLexico(current.scores!.lexico, best.scores!.lexico) < 0) {
+      if (cmp(current.scores!.lexico, best.scores!.lexico) < 0) {
         best = clonePlan(current);
       }
     }
@@ -311,6 +322,7 @@ function privacyGradientError(plan: FloorPlan, prefs: DesignPrefs): number {
   const ec = { x: entry.x + entry.w / 2, y: entry.y + entry.h / 2 };
   const lc = { x: living.x + living.w / 2, y: living.y + living.h / 2 };
   const livingDist = Math.hypot(lc.x - ec.x, lc.y - ec.y);
+  const depths = prefs.minDepthByCategory ? graphDepths(plan) : null;
   let err = 0;
   let n = 0;
   for (const r of plan.rooms) {
@@ -323,9 +335,34 @@ function privacyGradientError(plan: FloorPlan, prefs: DesignPrefs): number {
       const onEntryFace = touchesEntranceFacade(r, plan.entrance.direction, plan.outlineW, plan.outlineH);
       if (onEntryFace) err += 0.5;
     }
+    // Access-graph depth: bedrooms shallower than the strategy requires
+    // are penalised even when geometrically far from the entrance.
+    if (depths) {
+      const want = prefs.minDepthByCategory?.[r.category];
+      const have = depths.get(r.id) ?? Infinity;
+      if (want !== undefined && have < want) err += 0.4 * (want - have);
+    }
     n++;
   }
   return n > 0 ? err / n : 0;
+}
+
+/** BFS depth from ENTRY over the access tree. */
+function graphDepths(plan: FloorPlan): Map<string, number> {
+  const children = new Map<string, string[]>();
+  for (const e of plan.topology.edges) {
+    if (!children.has(e.parentId)) children.set(e.parentId, []);
+    children.get(e.parentId)!.push(e.childId);
+  }
+  const depths = new Map<string, number>();
+  const queue: Array<{ id: string; depth: number }> = [{ id: plan.topology.rootId, depth: 0 }];
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift()!;
+    if (depths.has(id)) continue;
+    depths.set(id, depth);
+    for (const c of children.get(id) ?? []) queue.push({ id: c, depth: depth + 1 });
+  }
+  return depths;
 }
 
 function touchesEntranceFacade(
@@ -361,11 +398,17 @@ function wetClusterScore(rooms: RoomRect[]): number {
   return varSum / wet.length / 100;
 }
 
-function shapePenalty(rooms: RoomRect[], maxAspect = 3): number {
-  const limit = Math.max(1.5, maxAspect);
+/**
+ * Room-shape penalty using per-category aspect limits from the strategy.
+ * Corridors / entries / foyers are excluded — circulation spaces are judged
+ * on width, travel distance and wasted area, not room aspect rules.
+ */
+function shapePenalty(rooms: RoomRect[], prefs: DesignPrefs): number {
+  const fallback = Math.max(1.5, prefs.maxAspectRatio);
   let p = 0;
   for (const r of rooms) {
     if (r.category === 'CORRIDOR' || r.category === 'ENTRY' || r.category === 'FOYER') continue;
+    const limit = Math.max(1.2, prefs.maxAspectRatioByCategory?.[r.category] ?? fallback);
     const aspect = Math.max(r.w / r.h, r.h / r.w);
     if (aspect > limit) p += aspect - limit;
   }

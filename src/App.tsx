@@ -1,33 +1,39 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Layers, Zap, Download, ChevronRight, ChevronLeft, Trophy, Activity,
-  GitCommit, Home, Settings, Box, Bug, Target, Sun, Ruler, Building2, Trees, LayoutGrid,
+  GitCommit, Home, Settings, Box, Bug, Ruler, Building2, Trees, LayoutGrid,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlanViewer2D } from './components/PlanViewer2D';
 import { MassingViewer3D } from './components/MassingViewer3D';
+import { DesignStrategySummary } from './components/strategy/DesignStrategySummary';
+import { AdvancedGenerationSettings } from './components/strategy/AdvancedGenerationSettings';
+import { StrategyReasoningDialog } from './components/strategy/StrategyReasoningDialog';
 import { type EntranceDirection } from './planner/ProgramBuilder';
 import { generateFloorPlanOptions, floorPlanToSolveProblem } from './planner/ProgramBuilder';
 import { buildFromSpecTopologyFirst } from './planner/generateFloorPlan';
 import { flowInfoFromPlan } from './optimizer/objectives';
 import type { FloorPlan } from './planner/types';
 import {
-  DEFAULT_METRIC_ORDER,
   METRIC_DEFS,
-  RANKING_PRESETS,
-  type MetricKey,
-  type RankingPresetId,
   formatMetricRaw,
   getMetricRaw,
   metricDef,
   metricQualityPercent,
   sortPlansByPriority,
 } from './planner/optimize/metrics';
-import {
-  type DaylightRoomKind,
-  type DesignPrefs,
-} from './planner/optimize/designPrefs';
 import { rescorePlan } from './planner/optimize/validPlanOptimizer';
+import {
+  resolveArchitecturalStrategy,
+  designPrefsFromStrategy,
+  withOverride,
+  withoutOverride,
+} from './planner/strategy/strategyResolver';
+import type {
+  OverrideValue,
+  StrategyOverrides,
+  StrategyPresetId,
+} from './planner/strategy/architecturalStrategy';
 import {
   AREA_UNIT_OPTIONS,
   type AreaUnitMode,
@@ -41,10 +47,11 @@ import {
   BHK_OPTIONS,
   TYPOLOGY_OPTIONS,
   availableVariants,
+  defaultBathroomCount,
   defaultCarpetM2,
-  designPrefsForTypology,
   programSpecFromTemplate,
   resolveTemplate,
+  withBathroomCount,
   type BuildingTypology,
   type TemplateVariant,
 } from './planner/typology';
@@ -80,11 +87,6 @@ const DIRECTION_LABELS: Record<EntranceDirection, string> = {
   W: 'West',
 };
 
-function buildPriority(primary: MetricKey, secondary: MetricKey[]): MetricKey[] {
-  const rest = DEFAULT_METRIC_ORDER.filter(k => k !== primary && !secondary.includes(k));
-  return [primary, ...secondary.filter(k => k !== primary), ...rest];
-}
-
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'2d' | '3d'>('2d');
   const [typology, setTypology] = useState<BuildingTypology>('apartment');
@@ -96,22 +98,22 @@ const App: React.FC = () => {
   );
   const [areaUnit, setAreaUnit] = useState<AreaUnitMode>('sqft');
   const [entranceDir, setEntranceDir] = useState<EntranceDirection>('S');
+  const [bathrooms, setBathrooms] = useState(() => defaultBathroomCount(resolveTemplate(2, 'standard')));
+  const [exactEnvelope, setExactEnvelope] = useState<{ w: number; h: number } | null>(null);
+  const [wantsBalcony, setWantsBalcony] = useState(false);
+  const [wantsUtility, setWantsUtility] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showDesignPrefs, setShowDesignPrefs] = useState(false);
-  const [showOptimize, setShowOptimize] = useState(false);
-  const [prefsFollowTypology, setPrefsFollowTypology] = useState(true);
   const [showGraphOverlay, setShowGraphOverlay] = useState(false);
   const [showDebugOverlay, setShowDebugOverlay] = useState(false);
   const [candidates, setCandidates] = useState<FloorPlan[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isSolving, setIsSolving] = useState(false);
   const [telemetry, setTelemetry] = useState<string[]>(['[system] typology-first studio ready']);
-  const [rankingPreset, setRankingPreset] = useState<RankingPresetId | 'custom'>('balanced');
-  const [primaryMetric, setPrimaryMetric] = useState<MetricKey>('areaError');
-  const [secondaryMetrics, setSecondaryMetrics] = useState<MetricKey[]>([]);
-  const [designPrefs, setDesignPrefs] = useState<DesignPrefs>(() =>
-    designPrefsForTypology('apartment', 'S', 'standard'),
-  );
+  /** Strategy layer state: a high-level preset + pinned per-field overrides. */
+  const [strategyPreset, setStrategyPreset] = useState<StrategyPresetId>('recommended');
+  const [overrides, setOverrides] = useState<StrategyOverrides>({});
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [showReasoning, setShowReasoning] = useState(false);
   const debugEnabled = isDebugEnabled();
 
   const template = useMemo(() => resolveTemplate(bhk, variant), [bhk, variant]);
@@ -126,46 +128,59 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const metricPriority = useMemo(
-    () => (rankingPreset === 'custom'
-      ? buildPriority(primaryMetric, secondaryMetrics)
-      : (RANKING_PRESETS.find(p => p.id === rankingPreset)?.order ?? DEFAULT_METRIC_ORDER)),
-    [rankingPreset, primaryMetric, secondaryMetrics],
-  );
-
-  const primaryKey = metricPriority[0] ?? 'areaError';
-
-  const prefsKey = [
-    designPrefs.daylightFacades.slice().sort().join(''),
-    designPrefs.daylightRooms.slice().sort().join(''),
-    designPrefs.maxAspectRatio,
-    designPrefs.maxCorridorRatio,
-    designPrefs.privacyOppositeEntry ? 1 : 0,
-  ].join('|');
-
-  // Keep design prefs synced to typology unless user customized
-  useEffect(() => {
-    if (!prefsFollowTypology) return;
-    setDesignPrefs(designPrefsForTypology(typology === 'multi_unit' ? 'apartment' : typology, entranceDir, variant));
-  }, [typology, entranceDir, variant, prefsFollowTypology]);
-
   const spec = useMemo(
-    () => programSpecFromTemplate(template, carpetAreaM2, typology === 'multi_unit' ? 'apartment' : typology),
-    [template, carpetAreaM2, typology],
+    () => withBathroomCount(
+      programSpecFromTemplate(template, carpetAreaM2, typology === 'multi_unit' ? 'apartment' : typology),
+      bathrooms,
+    ),
+    [template, carpetAreaM2, typology, bathrooms],
   );
 
-  const { outlineW, outlineH } = useMemo(() => {
+  const autoEnvelope = useMemo(() => {
     const aspect = typology === 'house' ? 1.15 : 1.3;
     const h = Math.sqrt(carpetAreaM2 / aspect);
     const w = carpetAreaM2 / h;
-    return { outlineW: Math.round(w * 10) / 10, outlineH: Math.round(h * 10) / 10 };
+    return { w: Math.round(w * 10) / 10, h: Math.round(h * 10) / 10 };
   }, [carpetAreaM2, typology]);
+
+  const outlineW = exactEnvelope?.w ?? autoEnvelope.w;
+  const outlineH = exactEnvelope?.h ?? autoEnvelope.h;
+
+  // ── Architectural strategy: resolved automatically from basic inputs.
+  //    Manual overrides stay pinned across input changes (hybrid mode). ──
+  const strategy = useMemo(
+    () => resolveArchitecturalStrategy({
+      spec,
+      bhk,
+      carpetAreaM2,
+      outlineW,
+      outlineH,
+      entranceDir,
+      bathroomCount: bathrooms,
+      typology: typology === 'multi_unit' ? 'apartment' : typology,
+      hasBalcony: wantsBalcony,
+      hasUtility: wantsUtility,
+      preset: strategyPreset,
+      overrides,
+    }),
+    [spec, bhk, carpetAreaM2, outlineW, outlineH, entranceDir, bathrooms, typology, wantsBalcony, wantsUtility, strategyPreset, overrides],
+  );
+
+  const designPrefs = useMemo(() => designPrefsFromStrategy(strategy), [strategy]);
+  const metricPriority = strategy.optimisation.lexicographicPriorities;
+  const metricWeights = strategy.optimisation.weights;
+  const primaryKey = metricPriority[0] ?? 'areaError';
+
+  const strategyKey = useMemo(
+    () => JSON.stringify({ d: designPrefs, p: metricPriority, w: metricWeights }),
+    [designPrefs, metricPriority, metricWeights],
+  );
 
   const defaultPlan = useMemo(() => {
     if (!canGenerate) return null;
     const { plan } = buildFromSpecTopologyFirst(spec, outlineW, outlineH, entranceDir, 42);
     return plan ? rescorePlan(plan, designPrefs) : plan;
-  }, [spec, outlineW, outlineH, entranceDir, prefsKey, canGenerate]);
+  }, [spec, outlineW, outlineH, entranceDir, designPrefs, canGenerate]);
 
   const activePlan = candidates.length > 0
     ? candidates[Math.min(selectedIndex, candidates.length - 1)]
@@ -183,19 +198,19 @@ const App: React.FC = () => {
     return flowInfoFromPlan(activePlan);
   }, [activePlan]);
 
-  const priorityKey = metricPriority.join('|');
-  useEffect(() => {
+  // Re-score and re-rank candidates whenever the resolved strategy changes.
+  React.useEffect(() => {
     if (candidates.length === 0) return;
     const current = candidates[Math.min(selectedIndex, candidates.length - 1)];
     const rescored = candidates.map(p => rescorePlan(p, designPrefs));
-    const sorted = sortPlansByPriority(rescored, metricPriority);
+    const sorted = sortPlansByPriority(rescored, metricPriority, metricWeights);
     const nextIdx = current
       ? Math.max(0, sorted.findIndex(p => p.seed === current.seed))
       : 0;
     setCandidates(sorted);
     setSelectedIndex(nextIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [priorityKey, prefsKey]);
+  }, [strategyKey]);
 
   const carpetMax = typology === 'house' ? 250 : 200;
 
@@ -210,7 +225,7 @@ const App: React.FC = () => {
     const t = resolveTemplate(bhk, variant);
     const carpet = defaultCarpetM2(next === 'multi_unit' ? 'apartment' : next, t);
     setCarpetAreaM2(carpet);
-    setPrefsFollowTypology(true);
+    setBathrooms(defaultBathroomCount(t));
     setTelemetry(prev => [...prev.slice(-5), `[typology] ${next.replace('_', ' ')}`]);
   };
 
@@ -221,8 +236,8 @@ const App: React.FC = () => {
     setVariant(nextVariant);
     const t = resolveTemplate(next, nextVariant);
     setCarpetAreaM2(defaultCarpetM2(typology === 'multi_unit' ? 'apartment' : typology, t));
+    setBathrooms(defaultBathroomCount(t));
     setCandidates([]);
-    setPrefsFollowTypology(true);
     setTelemetry(prev => [...prev.slice(-5), `[config] ${next} BHK · ${nextVariant}`]);
   };
 
@@ -230,38 +245,18 @@ const App: React.FC = () => {
     setVariant(next);
     const t = resolveTemplate(bhk, next);
     setCarpetAreaM2(defaultCarpetM2(typology === 'multi_unit' ? 'apartment' : typology, t));
+    setBathrooms(defaultBathroomCount(t));
     setCandidates([]);
-    setPrefsFollowTypology(true);
   };
 
-  const touchDesignPrefs = (updater: (p: DesignPrefs) => DesignPrefs) => {
-    setPrefsFollowTypology(false);
-    setDesignPrefs(updater);
+  const handleOverride = (key: string, value: OverrideValue) => {
+    setOverrides(o => withOverride(o, key, value));
+    setCandidates([]);
   };
 
-  const toggleDaylightFacade = (dir: EntranceDirection) => {
-    touchDesignPrefs(prev => {
-      const has = prev.daylightFacades.includes(dir);
-      return {
-        ...prev,
-        daylightFacades: has
-          ? prev.daylightFacades.filter(d => d !== dir)
-          : [...prev.daylightFacades, dir],
-      };
-    });
-  };
-
-  const toggleDaylightRoom = (kind: DaylightRoomKind) => {
-    touchDesignPrefs(prev => {
-      const has = prev.daylightRooms.includes(kind);
-      if (has && prev.daylightRooms.length <= 1) return prev;
-      return {
-        ...prev,
-        daylightRooms: has
-          ? prev.daylightRooms.filter(k => k !== kind)
-          : [...prev.daylightRooms, kind],
-      };
-    });
+  const handleResetOverride = (key: string) => {
+    setOverrides(o => withoutOverride(o, key));
+    setCandidates([]);
   };
 
   const carpetInputValue = areaUnit === 'sqft'
@@ -273,29 +268,6 @@ const App: React.FC = () => {
     else setCarpetFromM2(raw);
   };
 
-  const applyPreset = (id: RankingPresetId) => {
-    setRankingPreset(id);
-    const preset = RANKING_PRESETS.find(p => p.id === id)!;
-    setPrimaryMetric(preset.order[0]);
-    setSecondaryMetrics([]);
-  };
-
-  const selectPrimaryMetric = (key: MetricKey) => {
-    setPrimaryMetric(key);
-    setSecondaryMetrics(s => s.filter(k => k !== key));
-    setRankingPreset('custom');
-  };
-
-  const toggleSecondary = (key: MetricKey) => {
-    if (key === primaryMetric) return;
-    setRankingPreset('custom');
-    setSecondaryMetrics(prev => {
-      if (prev.includes(key)) return prev.filter(k => k !== key);
-      if (prev.length >= 2) return [...prev.slice(1), key];
-      return [...prev, key];
-    });
-  };
-
   const runGenerate = (selectBest: boolean) => {
     if (!canGenerate) {
       setTelemetry(prev => [...prev, '[info] multi-unit floor plates coming next — pick Apartment or House for now']);
@@ -304,7 +276,7 @@ const App: React.FC = () => {
     setIsSolving(true);
     setTelemetry(prev => [
       ...prev,
-      `[topo] ${typology} · ${template.name} · ${metricDef(primaryKey).label}`,
+      `[topo] ${typology} · ${template.name} · ${strategy.optimisation.profile} strategy`,
     ]);
 
     setTimeout(() => {
@@ -314,6 +286,7 @@ const App: React.FC = () => {
         baseSeed: Date.now() % 100000,
         optimizeIterations: 35,
         metricPriority,
+        metricWeights,
         designPrefs,
       });
 
@@ -342,7 +315,7 @@ const App: React.FC = () => {
       runGenerate(true);
       return;
     }
-    const sorted = sortPlansByPriority(candidates, metricPriority);
+    const sorted = sortPlansByPriority(candidates, metricPriority, metricWeights);
     setCandidates(sorted);
     setSelectedIndex(0);
     setTelemetry(prev => [
@@ -377,10 +350,7 @@ const App: React.FC = () => {
     outline: 'none',
   };
 
-  const activePresetHint =
-    rankingPreset === 'custom'
-      ? `Custom · primary ${metricDef(primaryKey).short}`
-      : RANKING_PRESETS.find(p => p.id === rankingPreset)?.hint ?? '';
+  const bathroomOptions = Array.from({ length: Math.min(4, bhk + 1) }, (_, i) => i + 1);
 
   return (
     <div className="layout">
@@ -532,9 +502,91 @@ const App: React.FC = () => {
                 </div>
                 <p className="section-hint">
                   Typical {formatArea(template.carpetAreaRange.min, areaUnit, 0)}–{formatArea(template.carpetAreaRange.max, areaUnit, 0)}
-                  {' · '}
-                  outline {formatOutline(outlineW, outlineH, areaUnit)}
                 </p>
+              </div>
+
+              <div className="section">
+                <p className="section-label">Envelope</p>
+                {exactEnvelope ? (
+                  <>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                      <input
+                        type="number"
+                        min={4}
+                        max={40}
+                        step={0.1}
+                        value={exactEnvelope.w}
+                        onChange={e => setExactEnvelope({ ...exactEnvelope, w: Math.max(4, parseFloat(e.target.value) || exactEnvelope.w) })}
+                        style={{ ...inputStyle, width: 72, textAlign: 'center' }}
+                      />
+                      <span style={{ color: '#64748b', fontSize: '0.75rem' }}>×</span>
+                      <input
+                        type="number"
+                        min={4}
+                        max={40}
+                        step={0.1}
+                        value={exactEnvelope.h}
+                        onChange={e => setExactEnvelope({ ...exactEnvelope, h: Math.max(4, parseFloat(e.target.value) || exactEnvelope.h) })}
+                        style={{ ...inputStyle, width: 72, textAlign: 'center' }}
+                      />
+                      <span style={{ color: '#64748b', fontSize: '0.7rem' }}>m</span>
+                      <button type="button" className="chip" style={{ marginLeft: 'auto', fontSize: '0.62rem' }} onClick={() => { setExactEnvelope(null); setCandidates([]); }}>
+                        Reset to Auto
+                      </button>
+                    </div>
+                    <p className="section-hint">Manual envelope pinned — derived from carpet area when reset.</p>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <p className="section-hint" style={{ marginBottom: 0 }}>
+                      {formatOutline(outlineW, outlineH, areaUnit)} · auto
+                    </p>
+                    <button type="button" className="chip" style={{ fontSize: '0.62rem' }} onClick={() => { setExactEnvelope({ w: outlineW, h: outlineH }); setCandidates([]); }}>
+                      Set exact size
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="section">
+                <p className="section-label">Bathrooms</p>
+                <div className="chip-row">
+                  {bathroomOptions.map(n => (
+                    <button
+                      key={n}
+                      type="button"
+                      className={`chip${bathrooms === n ? ' primary' : ''}`}
+                      onClick={() => { setBathrooms(n); setCandidates([]); }}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="section">
+                <p className="section-label">Extras</p>
+                <div className="chip-row">
+                  <button
+                    type="button"
+                    className={`chip${wantsBalcony ? ' primary' : ''}`}
+                    onClick={() => { setWantsBalcony(v => !v); setCandidates([]); }}
+                  >
+                    Balcony
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip${wantsUtility ? ' primary' : ''}`}
+                    onClick={() => { setWantsUtility(v => !v); setCandidates([]); }}
+                  >
+                    Utility
+                  </button>
+                </div>
+                {(wantsBalcony || wantsUtility) && (
+                  <p className="section-hint" style={{ marginTop: 6 }}>
+                    Noted in the design strategy — in-plan placement is coming soon.
+                  </p>
+                )}
               </div>
             </>
           )}
@@ -550,8 +602,8 @@ const App: React.FC = () => {
                 gridTemplateRows: '36px 36px 36px',
                 gap: 3,
               }}>
-                <button type="button" onClick={() => { setEntranceDir('N'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('N'), gridArea: 'n' }}>N</button>
-                <button type="button" onClick={() => { setEntranceDir('W'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('W'), gridArea: 'w' }}>W</button>
+                <button type="button" onClick={() => { setEntranceDir('N'); setCandidates([]); }} style={{ ...dirBtnStyle('N'), gridArea: 'n' }}>N</button>
+                <button type="button" onClick={() => { setEntranceDir('W'); setCandidates([]); }} style={{ ...dirBtnStyle('W'), gridArea: 'w' }}>W</button>
                 <div style={{
                   gridArea: 'c',
                   display: 'flex',
@@ -563,8 +615,8 @@ const App: React.FC = () => {
                 }}>
                   <Home size={14} color="#64748b" />
                 </div>
-                <button type="button" onClick={() => { setEntranceDir('E'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('E'), gridArea: 'e' }}>E</button>
-                <button type="button" onClick={() => { setEntranceDir('S'); setCandidates([]); setPrefsFollowTypology(true); }} style={{ ...dirBtnStyle('S'), gridArea: 's' }}>S</button>
+                <button type="button" onClick={() => { setEntranceDir('E'); setCandidates([]); }} style={{ ...dirBtnStyle('E'), gridArea: 'e' }}>E</button>
+                <button type="button" onClick={() => { setEntranceDir('S'); setCandidates([]); }} style={{ ...dirBtnStyle('S'), gridArea: 's' }}>S</button>
               </div>
               <div style={{ flex: 1 }}>
                 <p style={{ color: '#e2e8f0', fontSize: '0.85rem', fontWeight: 600 }}>
@@ -580,201 +632,25 @@ const App: React.FC = () => {
 
           {typology !== 'multi_unit' && (
             <>
-              {/* Design preferences — auto from typology; advanced override */}
-              <div className="section">
-                <button
-                  type="button"
-                  onClick={() => setShowDesignPrefs(v => !v)}
-                  style={{
-                    width: '100%',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'inherit',
-                    cursor: 'pointer',
-                    padding: 0,
-                    marginBottom: showDesignPrefs ? 10 : 0,
-                    fontFamily: 'inherit',
-                  }}
-                >
-                  <p className="section-label" style={{ marginBottom: 0 }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <Sun size={11} /> Design preferences
-                    </span>
-                  </p>
-                  <span style={{ color: '#64748b', fontSize: '0.65rem' }}>{showDesignPrefs ? 'Hide' : 'Auto'}</span>
-                </button>
-                {!showDesignPrefs && (
-                  <p className="section-hint">
-                    {prefsFollowTypology
-                      ? `Auto from ${typology === 'house' ? 'house' : 'apartment'} · light on ${designPrefs.daylightFacades.join('/')} · corridor ≤ ${(designPrefs.maxCorridorRatio * 100).toFixed(0)}%`
-                      : 'Custom overrides active'}
-                  </p>
-                )}
+              <DesignStrategySummary
+                strategy={strategy}
+                preset={strategyPreset}
+                onPresetChange={p => { setStrategyPreset(p); setCandidates([]); }}
+                advancedOpen={showAdvancedSettings}
+                onViewAdvanced={() => setShowAdvancedSettings(v => !v)}
+                onViewReasoning={() => setShowReasoning(true)}
+              />
 
-                {showDesignPrefs && (
-                  <>
-                    {prefsFollowTypology ? (
-                      <p className="section-hint" style={{ marginBottom: 10 }}>Editing any control switches to custom.</p>
-                    ) : (
-                      <button
-                        type="button"
-                        className="chip active"
-                        style={{ marginBottom: 10, borderRadius: 8, width: '100%' }}
-                        onClick={() => setPrefsFollowTypology(true)}
-                      >
-                        Reset to typology defaults
-                      </button>
-                    )}
-                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 8 }}>
-                      DAYLIGHT FAÇADES
-                    </p>
-                    <div className="chip-row" style={{ marginBottom: 4 }}>
-                      {(['N', 'E', 'S', 'W'] as EntranceDirection[]).map(d => (
-                        <button
-                          key={d}
-                          type="button"
-                          className={`chip${designPrefs.daylightFacades.includes(d) ? ' primary' : ''}`}
-                          onClick={() => toggleDaylightFacade(d)}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', margin: '12px 0 8px' }}>
-                      ROOMS NEEDING LIGHT
-                    </p>
-                    <div className="chip-row" style={{ marginBottom: 12 }}>
-                      {([
-                        { id: 'LIVING' as DaylightRoomKind, label: 'Living' },
-                        { id: 'BEDROOM' as DaylightRoomKind, label: 'Bedroom' },
-                        { id: 'KITCHEN' as DaylightRoomKind, label: 'Kitchen' },
-                      ]).map(r => (
-                        <button
-                          key={r.id}
-                          type="button"
-                          className={`chip${designPrefs.daylightRooms.includes(r.id) ? ' active' : ''}`}
-                          onClick={() => toggleDaylightRoom(r.id)}
-                        >
-                          {r.label}
-                        </button>
-                      ))}
-                    </div>
-                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
-                      MAX ROOM ASPECT · {designPrefs.maxAspectRatio.toFixed(1)}:1
-                    </p>
-                    <input
-                      type="range"
-                      min={2}
-                      max={4}
-                      step={0.1}
-                      value={designPrefs.maxAspectRatio}
-                      onChange={e => touchDesignPrefs(p => ({ ...p, maxAspectRatio: parseFloat(e.target.value) }))}
-                      style={{ width: '100%', marginBottom: 12 }}
-                    />
-                    <p style={{ color: '#64748b', fontSize: '0.65rem', fontWeight: 600, letterSpacing: '0.06em', marginBottom: 6 }}>
-                      MAX CORRIDOR · {(designPrefs.maxCorridorRatio * 100).toFixed(0)}% of carpet
-                    </p>
-                    <input
-                      type="range"
-                      min={0.06}
-                      max={0.18}
-                      step={0.01}
-                      value={designPrefs.maxCorridorRatio}
-                      onChange={e => touchDesignPrefs(p => ({ ...p, maxCorridorRatio: parseFloat(e.target.value) }))}
-                      style={{ width: '100%', marginBottom: 12 }}
-                    />
-                    <button
-                      type="button"
-                      className={`chip${designPrefs.privacyOppositeEntry ? ' primary' : ''}`}
-                      onClick={() => touchDesignPrefs(p => ({ ...p, privacyOppositeEntry: !p.privacyOppositeEntry }))}
-                      style={{ width: '100%', borderRadius: 8 }}
-                    >
-                      Keep bedrooms off entrance façade
-                    </button>
-                  </>
-                )}
-              </div>
-
-              <div className="section">
-                <button
-                  type="button"
-                  onClick={() => setShowOptimize(v => !v)}
-                  style={{
-                    width: '100%',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'inherit',
-                    cursor: 'pointer',
-                    padding: 0,
-                    marginBottom: showOptimize ? 10 : 0,
-                    fontFamily: 'inherit',
-                  }}
-                >
-                  <p className="section-label" style={{ marginBottom: 0 }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <Target size={11} /> Optimize for
-                    </span>
-                  </p>
-                  <span style={{ color: '#64748b', fontSize: '0.65rem' }}>
-                    {showOptimize ? 'Hide' : metricDef(primaryKey).short}
-                  </span>
-                </button>
-                {!showOptimize && (
-                  <p className="section-hint">{activePresetHint}</p>
-                )}
-                {showOptimize && (
-                  <>
-                    <div className="chip-row" style={{ marginBottom: 10 }}>
-                      {RANKING_PRESETS.map(p => (
-                        <button
-                          key={p.id}
-                          type="button"
-                          className={`chip${rankingPreset === p.id ? ' primary' : ''}`}
-                          onClick={() => applyPreset(p.id)}
-                          title={p.hint}
-                        >
-                          {p.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="chip-row">
-                      {METRIC_DEFS.map(m => (
-                        <button
-                          key={m.key}
-                          type="button"
-                          className={`chip${primaryMetric === m.key || (rankingPreset !== 'custom' && primaryKey === m.key) ? ' primary' : ''}`}
-                          onClick={() => selectPrimaryMetric(m.key)}
-                          title={m.hint}
-                        >
-                          {m.short}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="section-hint" style={{ marginTop: 8 }}>Secondary priorities:</p>
-                    <div className="chip-row">
-                      {METRIC_DEFS.filter(m => m.key !== primaryKey).map(m => {
-                        const on = secondaryMetrics.includes(m.key);
-                        return (
-                          <button
-                            key={m.key}
-                            type="button"
-                            className={`chip${on ? ' active' : ''}`}
-                            onClick={() => toggleSecondary(m.key)}
-                          >
-                            {on ? `${secondaryMetrics.indexOf(m.key) + 2}. ` : ''}{m.short}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
+              {showAdvancedSettings && (
+                <div className="section" style={{ paddingTop: 0 }}>
+                  <AdvancedGenerationSettings
+                    strategy={strategy}
+                    overrides={overrides}
+                    onOverride={handleOverride}
+                    onReset={handleResetOverride}
+                  />
+                </div>
+              )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <button type="button" onClick={handleGenerativeRun} disabled={isSolving || !canGenerate} className="btn-primary">
@@ -974,6 +850,10 @@ const App: React.FC = () => {
           </div>
         </div>
       </main>
+
+      {showReasoning && (
+        <StrategyReasoningDialog strategy={strategy} onClose={() => setShowReasoning(false)} />
+      )}
     </div>
   );
 };

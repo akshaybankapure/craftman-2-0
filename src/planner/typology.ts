@@ -157,29 +157,29 @@ export function programSpecFromTemplate(
   };
 }
 
-/** Auto design prefs from typology — hides most manual metric knobs. */
-export function designPrefsForTypology(
-  typology: BuildingTypology,
-  entrance: EntranceDirection,
-  variant: TemplateVariant,
-): DesignPrefs {
-  if (typology === 'house') {
-    return {
-      daylightFacades: houseDaylightFacades(entrance),
-      daylightRooms: ['LIVING', 'BEDROOM', 'KITCHEN'],
-      maxAspectRatio: variant === 'premium' ? 2.7 : variant === 'compact' ? 3.2 : 2.9,
-      maxCorridorRatio: 0.08,
-      privacyOppositeEntry: true,
-    };
-  }
-  // apartment (and multi_unit preview defaults)
-  return {
-    daylightFacades: apartmentDaylightFacades(entrance),
-    daylightRooms: ['LIVING', 'BEDROOM'],
-    maxAspectRatio: variant === 'compact' ? 3.4 : variant === 'premium' ? 2.9 : 3.1,
-    maxCorridorRatio: variant === 'compact' ? 0.14 : 0.11,
-    privacyOppositeEntry: true,
-  };
+/** Default bathroom count from a template (common + attached). */
+export function defaultBathroomCount(template: BHKTemplate): number {
+  const n = template.rooms
+    .filter(r => r.type.toLowerCase().includes('bathroom'))
+    .reduce((s, r) => s + r.count, 0);
+  return Math.max(1, n);
+}
+
+/**
+ * Adjust the bathroom count of a programme spec. The topology generator
+ * decides common vs ensuite assignment itself, so all bathrooms are merged
+ * into a single planner row.
+ */
+export function withBathroomCount(spec: ProgramSpec, count: number): ProgramSpec {
+  const existing = spec.rooms.find(r => r.type === 'bathroom' || r.type === 'ensuite');
+  const rooms = spec.rooms.filter(r => r.type !== 'bathroom' && r.type !== 'ensuite');
+  rooms.push({
+    type: 'bathroom',
+    count: Math.max(1, count),
+    targetArea: existing?.targetArea ?? 4,
+    minDimension: existing?.minDimension ?? 1.5,
+  });
+  return { ...spec, rooms };
 }
 
 export function resetDesignPrefsFromTypology(
