@@ -70,7 +70,8 @@ export function allowedParents(child: AccessNodeCategory): AccessNodeCategory[] 
     case 'FOYER':
       return ['ENTRY'];
     case 'CORRIDOR':
-      return ['ENTRY', 'FOYER'];
+      // Lobby / private threshold may hang off living (corridor-less living-hub plans)
+      return ['ENTRY', 'FOYER', 'LIVING'];
     case 'LIVING':
       return ['CORRIDOR', 'FOYER', 'ENTRY'];
     case 'KITCHEN':

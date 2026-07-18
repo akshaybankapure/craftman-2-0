@@ -198,6 +198,10 @@ export interface FloorPlan {
     shapeQuality: number;
     lexico: number[];
   };
+  /** Multi-layer engine artifacts (optional during migration). */
+  missionGraph?: import('../engine/topology/missionTypes.ts').MissionGraph;
+  fingerprint?: import('../engine/search/fingerprint.ts').LayoutFingerprint;
+  debug?: Record<string, unknown>;
 }
 
 export interface DoorConfig {

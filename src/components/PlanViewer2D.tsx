@@ -426,6 +426,13 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
               INVALID: {floorPlan.validation.errors.length} errors
             </text>
           )}
+          {/* Multi-layer engine debug: mission family + geometry path */}
+          <text x={padding} y={floorPlan.validation.valid ? 24 : 40} fill="#a78bfa" style={{ fontSize: '10px', fontWeight: 600 }}>
+            {String(floorPlan.missionGraph?.family ?? floorPlan.debug?.missionFamily ?? 'legacy')}
+            {' · '}
+            {String(floorPlan.debug?.geometryEngine ?? '?')}
+            {floorPlan.fingerprint ? ` · fp:${floorPlan.fingerprint.missionGraphFamily}` : ''}
+          </text>
         </g>
       )}
 

@@ -184,10 +184,17 @@ export function withBathroomCount(spec: ProgramSpec, count: number): ProgramSpec
 
 export function resetDesignPrefsFromTypology(
   typology: BuildingTypology,
-  entrance: EntranceDirection,
+  _entrance: EntranceDirection,
   variant: TemplateVariant,
 ): DesignPrefs {
-  return cloneDesignPrefs(designPrefsForTypology(typology, entrance, variant));
+  const prefs = cloneDesignPrefs(DEFAULT_DESIGN_PREFS);
+  if (typology === 'house') {
+    prefs.maxCorridorRatio = Math.min(prefs.maxCorridorRatio, 0.1);
+  }
+  if (variant === 'compact') {
+    prefs.maxCorridorRatio = Math.min(prefs.maxCorridorRatio, 0.09);
+  }
+  return prefs;
 }
 
 /** Prefer open façades away from the entrance for apartments. */
