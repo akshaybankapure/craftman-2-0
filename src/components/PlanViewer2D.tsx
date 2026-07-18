@@ -4,6 +4,7 @@ import { polygonArea } from '../geometry/vec2';
 import type { EntranceDirection } from '../planner/ProgramBuilder';
 import type { FlowInfo } from '../optimizer/objectives';
 import type { FloorPlan } from '../planner/types';
+import { resolveDisplayFurniture } from '../planner/bridge/furnitureDisplay';
 import {
   type AreaUnitMode,
   formatAreaCompact,
@@ -29,6 +30,8 @@ interface PlanViewer2DProps {
   /** Topology-first plan with physical doors / debug data. */
   floorPlan?: FloorPlan | null;
   showDebugOverlay?: boolean;
+  /** Show furniture footprints (spatial certificate or templates). Default on. */
+  showFurniture?: boolean;
   /** Display unit for room areas / dimensions on the plan. */
   areaUnit?: AreaUnitMode;
 }
@@ -56,6 +59,7 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
   roomColors,
   floorPlan = null,
   showDebugOverlay = false,
+  showFurniture = true,
   areaUnit = 'm2',
 }) => {
   const colors = roomColors || DEFAULT_COLORS;
@@ -91,6 +95,8 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
 
   const hasEntry = Array.from(graph.faces.values()).some(f => f.type === 'entry');
   const actualShowGraphOverlay = showGraphOverlay && hasEntry;
+  const furnitureItems =
+    showFurniture && floorPlan ? resolveDisplayFurniture(floorPlan) : [];
 
   // Portal routes through doors (prefer FloorPlan routes)
   const routePaths: string[] = [];
@@ -176,7 +182,12 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
         const counter = (typeCounters.get(face.type) || 0) + 1;
         typeCounters.set(face.type, counter);
         const displayName = face.type.charAt(0).toUpperCase() + face.type.slice(1);
-        const label = total > 1 ? `${displayName} ${counter}` : displayName;
+        // Only number repeatable private rooms — never "Living 2" for L-shaped living parts
+        const numberTypes = new Set(['bedroom', 'bathroom', 'ensuite']);
+        const label =
+          numberTypes.has(face.type) && total > 1
+            ? `${displayName} ${counter}`
+            : displayName;
 
         return (
           <g key={face.id}>
@@ -220,6 +231,41 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
           </g>
         );
       })}
+
+      {/* Furniture from spatial certificate or templates */}
+      {furnitureItems.map(item => {
+          const x = tx(item.x);
+          const y = ty(item.y);
+          const w = Math.max(2, item.w * svgScale);
+          const h = Math.max(2, item.h * svgScale);
+          const spatial = item.source === 'spatial';
+          return (
+            <g key={item.id} data-furniture={item.kind} data-room={item.roomId}>
+              <rect
+                x={x}
+                y={y}
+                width={w}
+                height={h}
+                rx={2}
+                fill={spatial ? 'rgba(215, 169, 91, 0.45)' : 'rgba(148, 163, 184, 0.28)'}
+                stroke={spatial ? '#ffe0a6' : '#94a3b8'}
+                strokeWidth={1}
+              />
+              {w >= 18 && h >= 12 && (
+                <text
+                  x={x + w / 2}
+                  y={y + h / 2}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fill={spatial ? '#fff7ed' : '#cbd5e1'}
+                  style={{ fontSize: Math.min(9, Math.max(6, w / 6)), fontWeight: 600 }}
+                >
+                  {item.kind}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
       {Array.from(graph.edges.values()).map(edge => {
         const vA = graph.vertices.get(edge.a)!;
@@ -432,6 +478,9 @@ export const PlanViewer2D: React.FC<PlanViewer2DProps> = ({
             {' · '}
             {String(floorPlan.debug?.geometryEngine ?? '?')}
             {floorPlan.fingerprint ? ` · fp:${floorPlan.fingerprint.missionGraphFamily}` : ''}
+            {furnitureItems.length > 0
+              ? ` · furniture ${furnitureItems.length} (${furnitureItems[0]?.source})`
+              : ''}
           </text>
         </g>
       )}

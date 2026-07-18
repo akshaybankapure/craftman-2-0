@@ -201,6 +201,8 @@ export interface FloorPlan {
   /** Multi-layer engine artifacts (optional during migration). */
   missionGraph?: import('../engine/topology/missionTypes.ts').MissionGraph;
   fingerprint?: import('../engine/search/fingerprint.ts').LayoutFingerprint;
+  /** Furniture footprints in metres (spatial certificate or templates). */
+  furniture?: import('./bridge/furnitureDisplay.ts').DisplayFurniture[];
   debug?: Record<string, unknown>;
 }
 

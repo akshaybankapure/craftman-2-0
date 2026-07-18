@@ -66,9 +66,9 @@ export function generateCirculationSkeleton(
     tree?.treeCells ??
     new Set([cellIndex(g, influence.entranceCell.cx, influence.entranceCell.cy)]);
 
-  const materialise =
-    demand.kind === 'corridor' ||
-    (demand.kind === 'private_threshold' && mission.hasDedicatedCirculation);
+  void mission; // reserved for future junction heuristics
+  const materialise = demand.kind === 'corridor';
+  // private_threshold / none → living-integrated: no separate corridor space.
 
   const dilateW = materialise ? widthM : Math.min(widthM, 0.9);
   const walkableCells = dilateCorridor(g, centrelineCells, dilateW);

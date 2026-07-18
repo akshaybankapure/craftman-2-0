@@ -8,6 +8,7 @@ import { RNG } from '../rng.ts';
 import { budgetFor } from '../budget/areaBudget.ts';
 import { DEFAULT_DESIGN_PREFS, isDaylightCategory, type DesignPrefs } from './designPrefs.ts';
 import { scoresForPriority, type MetricKey } from './metrics.ts';
+import { planShapeComplexity, roomShapeMetrics } from '../geometry/roomShape.ts';
 
 /**
  * Lexicographic scores (lower better). P1 validity is gated before calling this.
@@ -112,11 +113,10 @@ function scorePack(plan: FloorPlan, prefs: DesignPrefs = DEFAULT_DESIGN_PREFS) {
 }
 
 function mutate(plan: FloorPlan, rng: RNG): FloorPlan {
-  const move = rng.int(0, 4);
+  const move = rng.int(0, 3);
   if (move === 0) return swapRooms(plan, rng);
   if (move === 1) return shiftSharedWall(plan, rng);
-  if (move === 2) return expandContract(plan, rng);
-  return plan;
+  return expandContract(plan, rng);
 }
 
 function swapRooms(plan: FloorPlan, rng: RNG): FloorPlan {
@@ -238,6 +238,7 @@ function clonePlan(plan: FloorPlan): FloorPlan {
   return {
     ...plan,
     rooms: plan.rooms.map(r => ({ ...r, parts: r.parts?.map(p => ({ ...p })) })),
+    furniture: plan.furniture?.map(f => ({ ...f })),
     sharedWalls: [...plan.sharedWalls],
     doors: plan.doors.map(d => ({ ...d })),
     routes: plan.routes.map(r => ({ ...r, points: r.points.map(p => ({ ...p })) })),
@@ -271,6 +272,7 @@ function clonePlan(plan: FloorPlan): FloorPlan {
       metrics: { ...plan.validation.metrics },
     },
     scores: plan.scores ? { ...plan.scores, lexico: [...plan.scores.lexico] } : undefined,
+    debug: plan.debug ? { ...plan.debug } : undefined,
   };
 }
 
@@ -405,14 +407,21 @@ function wetClusterScore(rooms: RoomRect[]): number {
  */
 function shapePenalty(rooms: RoomRect[], prefs: DesignPrefs): number {
   const fallback = Math.max(1.5, prefs.maxAspectRatio);
-  let p = 0;
+  let aspectPen = 0;
+  let n = 0;
   for (const r of rooms) {
     if (r.category === 'CORRIDOR' || r.category === 'ENTRY' || r.category === 'FOYER') continue;
+    n++;
     const limit = Math.max(1.2, prefs.maxAspectRatioByCategory?.[r.category] ?? fallback);
     const aspect = Math.max(r.w / r.h, r.h / r.w);
-    if (aspect > limit) p += aspect - limit;
+    if (aspect > limit) aspectPen += aspect - limit;
+    // Fold in spatial-engine complexity (reflex corners, fill, short edges).
+    const shape = roomShapeMetrics(r);
+    aspectPen += shape.complexityScore / 20;
   }
-  return p / Math.max(1, rooms.length);
+  const meanAspect = aspectPen / Math.max(1, n);
+  // Blend with whole-plan complexity so L-shaped halls aren't over-penalised alone.
+  return meanAspect * 0.7 + planShapeComplexity(rooms) * 0.3;
 }
 
 function centroidBalance(rooms: RoomRect[], W: number, H: number): number {

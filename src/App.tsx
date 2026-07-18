@@ -288,6 +288,8 @@ const App: React.FC = () => {
         metricPriority,
         metricWeights,
         designPrefs,
+        tier: variant,
+        strategy,
       });
 
       if (result.infeasible && result.plans.length === 0) {

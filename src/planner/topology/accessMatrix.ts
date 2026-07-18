@@ -13,6 +13,7 @@ const ALLOWED: Set<string> = new Set([
   pair('CORRIDOR', 'KITCHEN'),
   pair('LIVING', 'BEDROOM'),
   pair('LIVING', 'KITCHEN'),
+  pair('LIVING', 'COMMON_BATHROOM'),
   pair('BEDROOM', 'ENSUITE_BATHROOM'),
   pair('KITCHEN', 'UTILITY'),
   pair('LIVING', 'BALCONY'),
@@ -27,7 +28,6 @@ const FORBIDDEN: Set<string> = new Set([
   pair('COMMON_BATHROOM', 'BEDROOM'),
   pair('COMMON_BATHROOM', 'KITCHEN'),
   pair('ENSUITE_BATHROOM', 'KITCHEN'),
-  pair('COMMON_BATHROOM', 'LIVING'),
   pair('ENSUITE_BATHROOM', 'LIVING'),
   pair('BEDROOM', 'BEDROOM'),
   pair('ENTRY', 'BEDROOM'),
@@ -79,7 +79,8 @@ export function allowedParents(child: AccessNodeCategory): AccessNodeCategory[] 
     case 'BEDROOM':
       return ['CORRIDOR', 'LIVING'];
     case 'COMMON_BATHROOM':
-      return ['CORRIDOR', 'FOYER'];
+      // Living-integrated plans may hang the common bath off living (no corridor).
+      return ['CORRIDOR', 'FOYER', 'LIVING'];
     case 'ENSUITE_BATHROOM':
       return ['BEDROOM'];
     case 'UTILITY':

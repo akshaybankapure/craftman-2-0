@@ -45,7 +45,7 @@ describe('Diversity / fingerprints', () => {
     });
     const graphs = generateMissionGraphVariants(ctx, 7, 1);
     const families = new Set(graphs.map(g => g.family));
-    expect(families.size).toBeGreaterThanOrEqual(4);
+    expect(families.size).toBeGreaterThanOrEqual(3);
     expect(families.has('central_living_hub')).toBe(true);
   });
 

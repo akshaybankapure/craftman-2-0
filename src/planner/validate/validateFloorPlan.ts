@@ -15,6 +15,11 @@ import type {
 } from '../types.ts';
 import { isBathroomCategory, roomArea } from '../types.ts';
 import { budgetFor } from '../budget/areaBudget.ts';
+import {
+  proportionLimitFor,
+  roomAspect,
+} from '../geometry/habitableProportions.ts';
+import { roomShapeMetrics } from '../geometry/roomShape.ts';
 
 export interface ValidateInput {
   rooms: RoomRect[];
@@ -87,18 +92,51 @@ export function validateFloorPlan(input: ValidateInput): ValidationResult {
       });
     }
     if (area > b.maxArea + 0.5) {
-      warnings.push({
-        code: 'MAX_AREA',
+      const issue = {
+        code: 'MAX_AREA' as const,
         message: `${r.id} area ${area.toFixed(2)} > max ${b.maxArea}`,
         roomIds: [r.id],
-      });
-      // Entry oversize is hard error
-      if (r.category === 'ENTRY' || r.category === 'FOYER') {
-        errors.push({
-          code: 'ENTRY_OVERSIZE',
-          message: `${r.id} exceeds max area ${b.maxArea}`,
+      };
+      // Habitable + corridor oversize is a hard reject — leftover-dump living
+      // and bowling-alley spines were shipping as warnings only.
+      if (
+        r.category === 'ENTRY' ||
+        r.category === 'FOYER' ||
+        r.category === 'LIVING' ||
+        r.category === 'BEDROOM' ||
+        r.category === 'KITCHEN' ||
+        r.category === 'CORRIDOR'
+      ) {
+        errors.push(issue);
+      } else {
+        warnings.push(issue);
+      }
+    }
+
+    // Hard: reject bowling-alley habitable rooms (vestibules warn only)
+    const prop = proportionLimitFor(r.category);
+    if (prop) {
+      const dims = largestUsefulRect(r);
+      const aspect = roomAspect(dims.w, dims.h);
+      const longSide = Math.max(dims.w, dims.h);
+      const isVestibule = r.category === 'ENTRY' || r.category === 'FOYER';
+      if (aspect > prop.maxAspect + 0.05) {
+        const issue = {
+          code: 'ASPECT_RATIO' as const,
+          message: `${r.id} aspect ${aspect.toFixed(2)} exceeds ${prop.maxAspect} (${dims.w.toFixed(2)}×${dims.h.toFixed(2)} m)`,
           roomIds: [r.id],
-        });
+        };
+        if (isVestibule) warnings.push(issue);
+        else errors.push(issue);
+      }
+      if (longSide > prop.maxSideM + 0.05) {
+        const issue = {
+          code: 'MAX_SIDE' as const,
+          message: `${r.id} long side ${longSide.toFixed(2)} m exceeds ${prop.maxSideM} m`,
+          roomIds: [r.id],
+        };
+        if (isVestibule) warnings.push(issue);
+        else errors.push(issue);
       }
     }
   }
@@ -163,7 +201,7 @@ export function validateFloorPlan(input: ValidateInput): ValidationResult {
     }
   }
 
-  // Forbidden edges among doors
+  // Forbidden edges among doors — accessMatrix is the single adjacency truth table
   const byId = new Map(rooms.map(r => [r.id, r]));
   for (const d of internalDoors) {
     const a = byId.get(d.roomAId);
@@ -175,33 +213,6 @@ export function validateFloorPlan(input: ValidateInput): ValidationResult {
         message: `Forbidden door ${a.category}↔${b.category}`,
         roomIds: [a.id, b.id],
       });
-    }
-  }
-
-  // Specific forbidden pairs
-  for (const d of internalDoors) {
-    const a = byId.get(d.roomAId)!;
-    const b = byId.get(d.roomBId)!;
-    const cats = [a.category, b.category].sort().join('|');
-    if (
-      (isBathroomCategory(a.category) && isBathroomCategory(b.category)) ||
-      cats === 'BEDROOM|BEDROOM' ||
-      (isBathroomCategory(a.category) && b.category === 'KITCHEN') ||
-      (isBathroomCategory(b.category) && a.category === 'KITCHEN') ||
-      (isBathroomCategory(a.category) && b.category === 'LIVING') ||
-      (isBathroomCategory(b.category) && a.category === 'LIVING')
-    ) {
-      // Ensuite-bedroom is allowed; skip if ensuite-bedroom
-      const ensuiteBed =
-        (a.category === 'ENSUITE_BATHROOM' && b.category === 'BEDROOM') ||
-        (b.category === 'ENSUITE_BATHROOM' && a.category === 'BEDROOM');
-      if (!ensuiteBed) {
-        errors.push({
-          code: 'ILLEGAL_PAIR',
-          message: `Illegal pair ${a.category}↔${b.category}`,
-          roomIds: [a.id, b.id],
-        });
-      }
     }
   }
 
@@ -222,6 +233,33 @@ export function validateFloorPlan(input: ValidateInput): ValidationResult {
         code: 'BATHROOM_DEGREE',
         message: `Bathroom ${r.id} degree ${deg} ≠ 1`,
         roomIds: [r.id],
+      });
+    }
+  }
+
+  // Dead-end corridor that only serves bathrooms is not real circulation
+  for (const r of rooms) {
+    if (r.category !== 'CORRIDOR') continue;
+    const neighbors = doorAdj.get(r.id) ?? [];
+    const cats = neighbors
+      .map(nid => byId.get(nid)?.category)
+      .filter((c): c is NonNullable<typeof c> => !!c);
+    const hasBath = cats.some(c => isBathroomCategory(c));
+    const hasBedroom = cats.includes('BEDROOM');
+    const hasKitchen = cats.includes('KITCHEN');
+    const onlyHostsAndBaths = cats.every(
+      c =>
+        c === 'LIVING' ||
+        c === 'ENTRY' ||
+        c === 'FOYER' ||
+        c === 'CORRIDOR' ||
+        isBathroomCategory(c),
+    );
+    if (hasBath && !hasBedroom && !hasKitchen && onlyHostsAndBaths) {
+      errors.push({
+        code: 'CORRIDOR_BATH_SPUR',
+        message: `${r.id} is a dead-end corridor that only serves bathrooms — not useful circulation`,
+        roomIds: [r.id, ...neighbors],
       });
     }
   }
@@ -301,6 +339,32 @@ export function validateFloorPlan(input: ValidateInput): ValidationResult {
     }
   }
 
+  // Soft: polygon shape complexity (spatial-engine heuristics)
+  for (const r of rooms) {
+    if (
+      r.category === 'CORRIDOR' ||
+      r.category === 'ENTRY' ||
+      r.category === 'FOYER' ||
+      r.category === 'BALCONY'
+    ) {
+      continue;
+    }
+    const shape = roomShapeMetrics(r);
+    if (shape.complexityScore > 14) {
+      warnings.push({
+        code: 'SHAPE_COMPLEX',
+        message: `${r.id} has high shape complexity (${shape.complexityScore.toFixed(1)})`,
+        roomIds: [r.id],
+      });
+    } else if (shape.boundingFillRatio < 0.72 && (r.parts?.length ?? 1) > 1) {
+      warnings.push({
+        code: 'SHAPE_FILL',
+        message: `${r.id} bounding fill ${(shape.boundingFillRatio * 100).toFixed(0)}% is low`,
+        roomIds: [r.id],
+      });
+    }
+  }
+
   const totalArea = rooms.reduce((s, r) => s + roomArea(r), 0);
   const corridorArea = rooms.filter(r => r.category === 'CORRIDOR').reduce((s, r) => s + roomArea(r), 0);
   const entryArea = rooms.filter(r => r.category === 'ENTRY' || r.category === 'FOYER').reduce((s, r) => s + roomArea(r), 0);
@@ -332,29 +396,31 @@ function rectOverlap(a: RoomRect, b: RoomRect): number {
   return (x2 - x1) * (y2 - y1);
 }
 
+/** Largest orthognal part — proportion gates use furnishable mass, not L-bbox. */
+function largestUsefulRect(r: RoomRect): { w: number; h: number } {
+  if (r.parts && r.parts.length > 0) {
+    let best = r.parts[0]!;
+    let bestA = best.w * best.h;
+    for (const p of r.parts) {
+      const a = p.w * p.h;
+      if (a > bestA) {
+        best = p;
+        bestA = a;
+      }
+    }
+    return { w: best.w, h: best.h };
+  }
+  return { w: r.w, h: r.h };
+}
+
 function bathroomTransitExists(
   rooms: RoomRect[],
   doorAdj: Map<string, string[]>,
 ): boolean {
-  const baths = new Set(rooms.filter(r => isBathroomCategory(r.category)).map(r => r.id));
-  const nonBath = rooms.filter(r => !isBathroomCategory(r.category) && r.category !== 'BALCONY');
-
-  for (const start of nonBath) {
-    for (const goal of nonBath) {
-      if (start.id === goal.id) continue;
-      // BFS avoiding... actually check if shortest path must go through bath
-      // Simpler: if any bath has 2+ non-bath neighbors that are not otherwise connected — already degree==1 prevents this
-      const neighbors = doorAdj.get(
-        [...baths][0] ?? ''
-      );
-      void neighbors;
-    }
-  }
-
-  // With degree==1 bathrooms cannot be transit nodes
-  for (const bid of baths) {
-    const n = doorAdj.get(bid) ?? [];
-    if (n.length > 1) return true;
+  // Degree > 1 means a bathroom is a transit node (degree==1 is already hard-gated).
+  const baths = rooms.filter(r => isBathroomCategory(r.category));
+  for (const bath of baths) {
+    if ((doorAdj.get(bath.id) ?? []).length > 1) return true;
   }
   return false;
 }

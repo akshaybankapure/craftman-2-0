@@ -47,7 +47,7 @@ describe('Mission graph families', () => {
     expect(families.has('living_integrated_circulation')).toBe(true);
     const graphs = generateMissionGraphVariants(ctx, 42, 1);
     const used = new Set(graphs.map(g => g.family));
-    expect(used.size).toBeGreaterThanOrEqual(4);
+    expect(used.size).toBeGreaterThanOrEqual(3);
   });
 
   it('every family produces a valid mission graph', () => {

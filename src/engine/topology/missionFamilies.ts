@@ -287,17 +287,26 @@ const BUILDERS: Record<MissionGraphFamily, (p: MissionProgramme, rng: RNG) => Mi
   compact_wet_core: buildCompactWetCore,
 };
 
-/** Families eligible given corridor policy. */
+/** Families eligible given corridor policy.
+ * Corridor spines are optional by default (ifNeeded): all families remain
+ * eligible, but corridor-less ones are listed first so the bandit explores
+ * living-integrated layouts before dedicated corridor rooms.
+ */
 export function eligibleFamilies(ctx: ContextProfile): MissionGraphFamily[] {
   const policy = ctx.circulation.corridorPolicy;
-  return ALL_MISSION_FAMILIES.filter(f => {
+  const filtered = ALL_MISSION_FAMILIES.filter(f => {
     const less = CORRIDOR_LESS_FAMILIES.has(f);
-    if (policy === 'always') return !less || f === 'short_private_corridor' || f === 'split_public_private_spine';
+    if (policy === 'always') return true;
     if (policy === 'never') return less;
-    // ifNeeded: all families; living-hub preferred first via bandit later
-    if (ctx.circulation.preferLivingHub && less) return true;
-    return true;
+    return true; // ifNeeded — corridor optional, not excluded
   });
+  if (policy === 'ifNeeded' && ctx.circulation.preferLivingHub) {
+    return [
+      ...filtered.filter(f => CORRIDOR_LESS_FAMILIES.has(f)),
+      ...filtered.filter(f => !CORRIDOR_LESS_FAMILIES.has(f)),
+    ];
+  }
+  return filtered;
 }
 
 export function generateMissionGraph(

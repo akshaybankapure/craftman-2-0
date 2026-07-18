@@ -40,8 +40,11 @@ export function evaluateRoomShape(
       if (minSide < 2.5) {
         return { ok: false, hardFail: true, reason: 'Bedroom too narrow for bed+clearance', score: 10 };
       }
-      if (ar > 2.4) {
+      if (ar > 2.0) {
         return { ok: false, hardFail: true, reason: 'Bedroom strip shape', score: 8 };
+      }
+      if (maxSide > 6.0) {
+        return { ok: false, hardFail: true, reason: 'Bedroom too long to furnish', score: 8 };
       }
       return { ok: true, hardFail: false, score: Math.max(0, ar - 1.5) };
     }
@@ -49,8 +52,11 @@ export function evaluateRoomShape(
       if (minSide < 2.8) {
         return { ok: false, hardFail: true, reason: 'Living too narrow', score: 10 };
       }
-      if (ar > 2.6) {
+      if (ar > 2.1) {
         return { ok: false, hardFail: true, reason: 'Living bowling-alley shape', score: 8 };
+      }
+      if (maxSide > 7.5) {
+        return { ok: false, hardFail: true, reason: 'Living too deep for seating/TV', score: 8 };
       }
       return { ok: true, hardFail: false, score: Math.max(0, ar - 1.4) };
     }
@@ -58,8 +64,8 @@ export function evaluateRoomShape(
       if (minSide < 1.7) {
         return { ok: false, hardFail: true, reason: 'Kitchen too narrow for clearance', score: 10 };
       }
-      if (ar > 3.5) {
-        return { ok: false, hardFail: false, reason: 'Kitchen elongated', score: 3 };
+      if (ar > 2.8) {
+        return { ok: false, hardFail: true, reason: 'Kitchen elongated', score: 5 };
       }
       return { ok: true, hardFail: false, score: Math.max(0, ar - 2) };
     }

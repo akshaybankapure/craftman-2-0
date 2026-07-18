@@ -32,7 +32,7 @@ export interface DesignPrefs {
 export const DEFAULT_DESIGN_PREFS: DesignPrefs = {
   daylightFacades: [],
   daylightRooms: ['LIVING', 'BEDROOM'],
-  maxAspectRatio: 3,
+  maxAspectRatio: 2.2,
   maxCorridorRatio: 0.12,
   privacyOppositeEntry: true,
 };

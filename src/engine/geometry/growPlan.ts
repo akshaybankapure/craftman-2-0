@@ -6,6 +6,7 @@ import type { AreaBudget, AccessTree, CorridorSpine, EntranceDirection, RoomRect
 import type { ContextProfile } from '../context/contextProfile.ts';
 import { resolveCirculationDemand } from '../circulation/demandModel.ts';
 import { generateCirculationSkeleton } from '../circulation/skeleton.ts';
+import { collapseOptionalCorridor } from '../topology/collapseOptionalCorridor.ts';
 import type { MissionGraph } from '../topology/missionTypes.ts';
 import { buildInfluenceMap } from '../zoning/influenceMap.ts';
 import { growRoomRegions } from './regionGrowth.ts';
@@ -16,6 +17,8 @@ export interface GrowPlanResult {
   ok: boolean;
   reason?: string;
   debug?: Record<string, unknown>;
+  /** Topology after optional corridor collapse (living-integrated). */
+  topology?: AccessTree;
 }
 
 export function growPlanFromMission(params: {
@@ -58,6 +61,10 @@ export function growPlanFromMission(params: {
     }
   }
 
+  const activeTopology = circulation.materialiseCorridorRoom
+    ? topology
+    : collapseOptionalCorridor(topology);
+
   const spine: CorridorSpine = {
     shape: circulation.materialiseCorridorRoom
       ? circulation.junctions.length > 0
@@ -79,9 +86,12 @@ export function growPlanFromMission(params: {
   };
 
   return {
-    rooms: growth.rooms,
+    rooms: growth.rooms.filter(
+      r => circulation.materialiseCorridorRoom || r.category !== 'CORRIDOR',
+    ),
     spine,
     ok: true,
+    topology: activeTopology,
     debug: {
       missionFamily: mission.family,
       circulationDemand: demand,

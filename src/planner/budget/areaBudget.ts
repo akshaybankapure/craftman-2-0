@@ -1,5 +1,6 @@
 import type { AccessNode, AccessNodeCategory, AccessTree, AreaBudget } from '../types.ts';
 import type { ProgramSpec } from '../../types/index.ts';
+import type { MarketTier } from '../../engine/context/contextProfile.ts';
 
 export class InfeasibleProgrammeError extends Error {
   constructor(message: string) {
@@ -29,7 +30,7 @@ const DEFAULTS: Record<AccessNodeCategory, CategoryDefaults> = {
     minWidth: 1.0, minHeight: 1.0, preferredAspectRatio: 1.2, areaPriority: 2,
   },
   CORRIDOR: {
-    minArea: 2.0, targetMin: 3, targetMax: 8, maxArea: 12,
+    minArea: 2.0, targetMin: 3, targetMax: 6, maxArea: 8,
     minWidth: 1.0, minHeight: 1.0, preferredAspectRatio: 3.0, areaPriority: 3,
   },
   LIVING: {
@@ -62,30 +63,73 @@ const DEFAULTS: Record<AccessNodeCategory, CategoryDefaults> = {
   },
 };
 
+/** Mirrors spatial TIER_SCALE so compact/standard/premium actually change budgets. */
+const TIER_SCALE: Record<MarketTier, { min: number; target: number; max: number; width: number }> = {
+  compact: { min: 0.92, target: 0.9, max: 0.92, width: 0.95 },
+  standard: { min: 1, target: 1, max: 1, width: 1 },
+  premium: { min: 1.05, target: 1.18, max: 1.3, width: 1.05 },
+};
+
+const SPEC_TYPE_TO_CATEGORY: Record<string, AccessNodeCategory> = {
+  living: 'LIVING',
+  kitchen: 'KITCHEN',
+  bedroom: 'BEDROOM',
+  bathroom: 'COMMON_BATHROOM',
+  ensuite: 'ENSUITE_BATHROOM',
+  corridor: 'CORRIDOR',
+  entry: 'ENTRY',
+  foyer: 'FOYER',
+  utility: 'UTILITY',
+  balcony: 'BALCONY',
+};
+
 /** Build area budgets for an access tree given carpet area. */
 export function buildAreaBudgets(
   tree: AccessTree,
   carpetArea: number,
+  options?: { spec?: ProgramSpec; tier?: MarketTier },
 ): AreaBudget[] {
+  const tier = options?.tier ?? 'standard';
+  const scale = TIER_SCALE[tier];
+  const specTargets = specTargetByCategory(options?.spec);
   const budgets: AreaBudget[] = [];
 
   for (const node of tree.nodes) {
     const d = DEFAULTS[node.category];
-    let maxArea = d.maxArea;
+    const fromSpec = specTargets.get(node.category);
+    // Tier scales targets/max (programme ambition). Structural mins stay stable so
+    // compact/premium don't break pack validation on min-width alone.
+    // Compact keeps the same hard max caps (only targets shrink) — otherwise
+    // spatial packs at ~20–26 m² living hard-fail compact max 25.76.
+    const maxScale = tier === 'compact' ? 1 : scale.max;
+    let maxArea = d.maxArea * maxScale;
+    let minArea = d.minArea;
+    let targetArea = fromSpec ?? ((d.targetMin + d.targetMax) / 2) * scale.target;
+    let minWidth = d.minWidth;
+    let minHeight = d.minHeight;
+
     if (node.category === 'ENTRY' || node.category === 'FOYER') {
       maxArea = Math.min(maxArea, carpetArea * 0.06);
     }
     if (node.category === 'CORRIDOR') {
-      maxArea = Math.min(maxArea, carpetArea * 0.12);
+      // Corridors are circulation, not leftover dumps — keep tight.
+      maxArea = Math.min(maxArea, carpetArea * 0.08, 8);
     }
+    if (node.category === 'LIVING') {
+      // Hard living cap uses maxScale (compact keeps full 28 m²).
+      maxArea = Math.min(maxArea, 28 * maxScale);
+    }
+
+    targetArea = Math.min(Math.max(targetArea, minArea), maxArea);
+
     budgets.push({
       roomId: node.id,
       category: node.category,
-      minArea: d.minArea,
-      targetArea: (d.targetMin + d.targetMax) / 2,
+      minArea,
+      targetArea,
       maxArea,
-      minWidth: d.minWidth,
-      minHeight: d.minHeight,
+      minWidth,
+      minHeight,
       preferredAspectRatio: d.preferredAspectRatio,
       areaPriority: d.areaPriority,
     });
@@ -94,6 +138,19 @@ export function buildAreaBudgets(
   normalizeTargets(budgets, carpetArea);
   assertFeasible(budgets, carpetArea);
   return budgets;
+}
+
+function specTargetByCategory(spec?: ProgramSpec): Map<AccessNodeCategory, number> {
+  const out = new Map<AccessNodeCategory, number>();
+  if (!spec) return out;
+  for (const r of spec.rooms) {
+    const cat = SPEC_TYPE_TO_CATEGORY[r.type];
+    if (!cat || !(r.targetArea > 0)) continue;
+    // Average when multiple programme lines map to one category.
+    const prev = out.get(cat);
+    out.set(cat, prev == null ? r.targetArea : (prev + r.targetArea) / 2);
+  }
+  return out;
 }
 
 /** Derive a programme node list from ProgramSpec (counts). */
@@ -122,16 +179,37 @@ export function programmeFromSpec(spec: ProgramSpec): {
 function normalizeTargets(budgets: AreaBudget[], carpetArea: number): void {
   const sumTargets = budgets.reduce((s, b) => s + b.targetArea, 0);
   if (sumTargets <= carpetArea * 0.98) {
-    // Distribute leftover to high-priority rooms
+    // Distribute leftover to high-priority rooms — but prefer bedrooms after
+    // living has a fair share, so living never vacuums the entire carpet.
     let leftover = carpetArea * 0.97 - sumTargets;
-    const ranked = [...budgets].sort((a, b) => b.areaPriority - a.areaPriority);
-    for (const b of ranked) {
-      if (leftover <= 0) break;
-      const room = budgets.find(x => x.roomId === b.roomId)!;
-      const grow = Math.min(leftover, room.maxArea - room.targetArea);
-      if (grow > 0) {
-        room.targetArea += grow;
-        leftover -= grow;
+    const ranked = [...budgets].sort((a, b) => {
+      const rankOf = (x: typeof a) =>
+        x.category === 'LIVING'
+          ? 100
+          : x.category === 'BEDROOM'
+            ? 90
+            : x.category === 'KITCHEN'
+              ? 70
+              : x.areaPriority;
+      return rankOf(b) - rankOf(a);
+    });
+    // First pass: grow living at most halfway to max, then fill bedrooms.
+    for (const pass of [0, 1] as const) {
+      for (const b of ranked) {
+        if (leftover <= 0) break;
+        if (pass === 0 && b.category !== 'LIVING') continue;
+        if (pass === 1 && b.category === 'LIVING') continue;
+        const room = budgets.find(x => x.roomId === b.roomId)!;
+        const headroom = room.maxArea - room.targetArea;
+        if (headroom <= 0) continue;
+        const grow =
+          pass === 0 && room.category === 'LIVING'
+            ? Math.min(leftover, headroom * 0.5)
+            : Math.min(leftover, headroom);
+        if (grow > 0) {
+          room.targetArea += grow;
+          leftover -= grow;
+        }
       }
     }
     return;

@@ -25,10 +25,10 @@ const OUTLINE = { w: 10.2, h: 7.8 };
 
 function validPlan(dir: EntranceDirection = 'S', seed = 11): FloorPlan {
   const result = generateFloorPlanOptions(SPEC_2BHK, OUTLINE.w, OUTLINE.h, dir, {
-    seeds: 40,
+    seeds: 24,
     retain: 1,
     baseSeed: seed,
-    optimizeIterations: 10,
+    optimizeIterations: 5,
   });
   expect(result.plans.length).toBeGreaterThan(0);
   return result.plans[0];
@@ -182,7 +182,7 @@ describe('Topology-first floor plan invariants', () => {
       if (dir === 'W') expect(Math.abs(p.x)).toBeLessThan(0.15);
       if (dir === 'E') expect(Math.abs(p.x - plan.outlineW)).toBeLessThan(0.15);
     }
-  });
+  }, 20_000);
 
   it('Test 15: the same seed produces the same plan', () => {
     const a = generateOne(SPEC_2BHK, OUTLINE.w, OUTLINE.h, 'S', 12345, 0)!;

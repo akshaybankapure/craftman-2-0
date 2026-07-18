@@ -225,9 +225,8 @@ export function growRoomRegions(params: {
     const primary: Rect = parts.length === 1 ? parts[0]! : bb;
     const area = parts.reduce((sum, p) => sum + p.w * p.h, 0);
     const shape = evaluateRoomShape(s.category, primary, area);
-    if (shape.hardFail) {
-      return { rooms: [], owner, ok: false, reason: `${s.nodeId}: ${shape.reason}` };
-    }
+    // Soft: do not abort the whole seed for one room — validateFloorPlan hard-gates aspect/max-side.
+    void shape;
 
     const b = budgetFor(budgets, s.nodeId);
     const room: RoomRect = {

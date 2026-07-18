@@ -152,22 +152,57 @@ function validateRoom(
       });
       local = 0;
     } else {
-      placements.push({
-        kind: 'sofa',
-        roomId: room.id,
-        x: room.x + 0.4,
-        y: room.y + 0.4,
-        w: Math.min(dims.sofa.w, room.w - 0.8),
-        h: dims.sofa.h,
-      });
-      placements.push({
-        kind: 'tvWall',
-        roomId: room.id,
-        x: room.x + 0.2,
-        y: room.y + room.h - 0.35,
-        w: Math.min(2.0, room.w - 0.4),
-        h: 0.2,
-      });
+      const viewMin = 1.8;
+      const viewMax = 4.5;
+      const alongH = room.h >= room.w;
+      const depth = alongH ? room.h : room.w;
+      const sofaDepth = dims.sofa.h;
+      const clearDepth = depth - sofaDepth - 0.4;
+      if (clearDepth > viewMax + 0.3) {
+        conflicts.push({
+          roomId: room.id,
+          kind: 'tvWall',
+          message: `Living ${room.id} too deep (${depth.toFixed(1)} m) for sofa–TV viewing`,
+        });
+        local = 0;
+      } else {
+        const viewGap = Math.min(viewMax, Math.max(viewMin, clearDepth * 0.55));
+        if (alongH) {
+          placements.push({
+            kind: 'sofa',
+            roomId: room.id,
+            x: room.x + 0.4,
+            y: room.y + 0.4,
+            w: Math.min(dims.sofa.w, room.w - 0.8),
+            h: sofaDepth,
+          });
+          placements.push({
+            kind: 'tvWall',
+            roomId: room.id,
+            x: room.x + 0.2,
+            y: room.y + 0.4 + sofaDepth + viewGap,
+            w: Math.min(2.0, room.w - 0.4),
+            h: 0.2,
+          });
+        } else {
+          placements.push({
+            kind: 'sofa',
+            roomId: room.id,
+            x: room.x + 0.4,
+            y: room.y + 0.4,
+            w: sofaDepth,
+            h: Math.min(dims.sofa.w, room.h - 0.8),
+          });
+          placements.push({
+            kind: 'tvWall',
+            roomId: room.id,
+            x: room.x + 0.4 + sofaDepth + viewGap,
+            y: room.y + 0.2,
+            w: 0.2,
+            h: Math.min(2.0, room.h - 0.4),
+          });
+        }
+      }
     }
   }
 

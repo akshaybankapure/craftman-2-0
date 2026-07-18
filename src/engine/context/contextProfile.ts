@@ -93,10 +93,13 @@ export function resolveContextProfile(input: ContextInput): ContextProfile {
     preferLivingHub = true;
     allowPrivateThreshold = true;
     if (!corridorPolicy) {
-      // Compact / 2BHK apartments: corridor only when demanded
-      corridorPolicy = input.bhk <= 2 && typology === 'apartment' ? 'ifNeeded' : 'ifNeeded';
+      // 1–2 BHK: living-hub only. 3BHK+: corridor optional (spine is last resort,
+      // not a peer layout style) — hard MAX_AREA / living caps stop wasteful halls.
+      corridorPolicy = input.bhk <= 2 ? 'never' : 'ifNeeded';
       reasoning.push(
-        'India apartment profile: prefer living-hub access; materialise corridor only when privacy/access demands it',
+        corridorPolicy === 'never'
+          ? '2BHK or smaller: corridor suppressed — living-hub access only'
+          : 'Corridor optional: prefer living-hub; spine only when privacy demands it',
       );
     }
   } else {

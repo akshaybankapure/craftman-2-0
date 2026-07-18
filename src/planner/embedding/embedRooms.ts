@@ -1,4 +1,10 @@
 import { budgetFor } from '../budget/areaBudget.ts';
+import {
+  bedroomWidthCap,
+  livingDepthCap,
+  maxPrivateWingWidth,
+  maxPublicWingWidth,
+} from '../geometry/habitableProportions.ts';
 import type {
   AccessNodeCategory,
   AccessTree,
@@ -97,8 +103,8 @@ function paramsForStyle(style: LayoutStyle, rng: RNG): LayoutParams {
       };
     case 'wetCluster':
       return {
-        // Bias corridor so public wing is wide enough for wet stack + living
-        corrBias: rng.bool() ? 'farLeft' : 'farRight',
+        // Keep wings balanced — extreme corridor bias creates bowling-alley bedrooms
+        corrBias: rng.bool() ? 'left' : 'right',
         kitchenMode: 'stripDeep',
         bathOrder: 'deep',
         guestWing: false,
@@ -107,8 +113,8 @@ function paramsForStyle(style: LayoutStyle, rng: RNG): LayoutParams {
       };
     case 'splitWings':
       return {
-        // Asymmetric: small private wing + wide public wing with guest bedroom
-        corrBias: rng.bool() ? 'farLeft' : 'farRight',
+        // Asymmetric but capped: public wing wide enough for living + guest
+        corrBias: rng.bool() ? 'left' : 'right',
         kitchenMode: rng.pick(['sideCorridor', 'stripDeep'] as const),
         bathOrder: 'deep',
         guestWing: true,
@@ -171,31 +177,54 @@ function embedNS(input: EmbedInput, style: LayoutStyle): RoomRect[] {
 
   const minBand = Math.min(3.4, (W - corrW) * 0.42);
   const corrFrac = biasToFrac(params.corrBias, rng);
-  const corrX = clamp(W * corrFrac, minBand, W - corrW - minBand);
+  let corrX = clamp(W * corrFrac, minBand, W - corrW - minBand);
   const corrY = fromS ? 0 : circDepth;
   const corrH = H - circDepth;
+
+  // Preferred private side from style (lock before rebalancing wing widths).
+  let privateOnLeft: boolean;
+  if (params.corrBias === 'farLeft' || params.corrBias === 'left') {
+    privateOnLeft = false;
+  } else if (params.corrBias === 'farRight' || params.corrBias === 'right') {
+    privateOnLeft = true;
+  } else {
+    privateOnLeft = rng.bool();
+  }
+  // Guest-wing styles: private on the smaller wing so living gets width.
+  if (params.guestWing) {
+    privateOnLeft = corrX <= W - corrX - corrW;
+  }
+
+  const maxPrivW = maxPrivateWingWidth(bedrooms.length, corrH);
+  const livB = budgetFor(budgets, living.id);
+  // Size public wing from living max area so strip embed cannot dump the
+  // whole remaining carpet into a 60+ m² hall.
+  const maxPubFromLiving = Math.max(
+    3.6,
+    livB.maxArea / Math.max(3.2, corrH * 0.55) + 1.2,
+  );
+  const maxPubW = Math.min(
+    Math.max(maxPublicWingWidth(corrH), params.guestWing ? 4.2 : 3.6),
+    maxPubFromLiving,
+  );
+  if (privateOnLeft) {
+    if (corrX > maxPrivW) corrX = maxPrivW;
+    if (W - corrX - corrW > maxPubW) corrX = Math.max(minBand, W - corrW - maxPubW);
+    if (corrX > maxPrivW) corrX = maxPrivW;
+  } else {
+    if (W - corrX - corrW > maxPrivW) corrX = Math.max(minBand, W - corrW - maxPrivW);
+    if (corrX > maxPubW) corrX = Math.min(maxPubW, W - corrW - minBand);
+    if (W - corrX - corrW > maxPrivW) corrX = Math.max(minBand, W - corrW - maxPrivW);
+  }
+  corrX = clamp(corrX, minBand, W - corrW - minBand);
 
   rooms.push(rectRoom(corr.id, 'CORRIDOR', { x: corrX, y: corrY, w: corrW, h: corrH }, budgets, true));
   placeEntryFoyerNS(rooms, entry, foyer, budgets, corrX, corrW, entryDepth, foyerDepth, circDepth, H, fromS);
 
   const left: Rect = { x: 0, y: corrY, w: corrX, h: corrH };
   const right: Rect = { x: corrX + corrW, y: corrY, w: W - corrX - corrW, h: corrH };
-
-  // Default: private (bedrooms) on the larger wing.
-  // Guest-wing styles invert this so the public wing is wide enough for living + a bedroom.
-  let privateOnLeft: boolean;
   if (params.guestWing) {
-    privateOnLeft = left.w <= right.w; // private on smaller → public on larger
-  } else if (params.corrBias === 'farLeft' || params.corrBias === 'left') {
-    privateOnLeft = false;
-  } else if (params.corrBias === 'farRight' || params.corrBias === 'right') {
-    privateOnLeft = true;
-  } else if (left.w < right.w) {
-    privateOnLeft = true;
-  } else if (left.w > right.w) {
-    privateOnLeft = false;
-  } else {
-    privateOnLeft = rng.bool();
+    privateOnLeft = left.w <= right.w;
   }
 
   let bedItems = bedrooms.map(bed => {
@@ -240,8 +269,18 @@ function embedNS(input: EmbedInput, style: LayoutStyle): RoomRect[] {
   // Wet cluster only when public height can fit bath + kitchen mins + living min
   const kitMinH = Math.max(budgetFor(budgets, kitchen.id).minHeight, 2.1);
   const wetNeed = bathItems.length * 1.55 + kitMinH + livingMin;
-  const wetOnPublic =
+  let wetOnPublic =
     params.wetOnPublic && bathItems.length > 0 && publicZone.h + (params.livingPocket ? circDepth : 0) >= wetNeed + 0.2;
+  // Prefer wet-on-public whenever the private stack would starve bedroom height
+  if (
+    bathItems.length > 0 &&
+    publicZone.h + (params.livingPocket ? circDepth : 0) >= wetNeed + 0.2
+  ) {
+    const privateCount = bedItems.length + (wetOnPublic ? 0 : bathItems.length);
+    if (bedItems.length >= 3 || privateZone.h / Math.max(1, privateCount) < 2.6) {
+      wetOnPublic = true;
+    }
+  }
   const privateBaths = wetOnPublic ? [] : bathItems;
   const publicBaths = wetOnPublic ? bathItems : [];
 
@@ -311,29 +350,48 @@ function packPublicNS(opts: {
     }
   }
 
-  // Wet cluster: common baths + kitchen stacked at deep end along corridor
+  // Wet cluster: baths + kitchen at deep end. Wide wings use a side-by-side
+  // wet block so baths/kitchens are not full-width bowling strips.
   if (publicBaths.length > 0) {
     const kitB = budgetFor(budgets, kitchen.id);
     const bathMin = publicBaths.length * 1.55;
     const kitMin = Math.max(kitB.minHeight, 2.1);
     const pocketBonus = livingPocket ? circDepth : 0;
     const maxWet = zone.h + pocketBonus - livingMin;
-    const wetH = clamp(bathMin + kitMin, bathMin + kitMin, Math.min(zone.h * 0.55, maxWet));
+    const livCap = livingDepthCap(zone.w);
+    const preferWet = Math.max(zone.h - livCap, Math.max(bathMin, kitMin));
+    const wetH = clamp(preferWet, Math.max(bathMin, kitMin), Math.min(zone.h * 0.7, maxWet));
     const wetZone: Rect = fromS
       ? { x: zone.x, y: zone.y, w: zone.w, h: wetH }
       : { x: zone.x, y: zone.y + zone.h - wetH, w: zone.w, h: wetH };
 
-    const bathH = Math.min(bathMin, wetH - kitMin);
-    const kitH = wetH - bathH;
-    const bathZone: Rect = fromS
-      ? { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: bathH }
-      : { x: wetZone.x, y: wetZone.y + wetZone.h - bathH, w: wetZone.w, h: bathH };
-    const kitZone: Rect = fromS
-      ? { x: wetZone.x, y: wetZone.y + bathH, w: wetZone.w, h: kitH }
-      : { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: kitH };
+    const useSideBySide = wetZone.w >= 4.2;
+    if (useSideBySide) {
+      const bathW = clamp(bathMin, 1.7 * publicBaths.length, Math.min(3.0, wetZone.w * 0.42));
+      const bathsOnCorridor = !privateOnLeft; // corridor is on the private-facing side of public zone
+      // privateOnLeft false → public is left, corridor on right of public → baths against corridor (right)
+      const bathAgainstCorridor = privateOnLeft
+        ? { x: wetZone.x, y: wetZone.y, w: bathW, h: wetH } // corridor on left of public
+        : { x: wetZone.x + wetZone.w - bathW, y: wetZone.y, w: bathW, h: wetH };
+      void bathsOnCorridor;
+      const kitZone: Rect = privateOnLeft
+        ? { x: wetZone.x + bathW, y: wetZone.y, w: wetZone.w - bathW, h: wetH }
+        : { x: wetZone.x, y: wetZone.y, w: wetZone.w - bathW, h: wetH };
+      stackVertical(bathAgainstCorridor, publicBaths, budgets, rooms, privateOnLeft, rng);
+      placeKitchenInRect(rooms, kitchen.id, utility, kitZone, budgets, fromS, rng);
+    } else {
+      const bathH = Math.min(bathMin, wetH - kitMin);
+      const kitH = wetH - bathH;
+      const bathZone: Rect = fromS
+        ? { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: bathH }
+        : { x: wetZone.x, y: wetZone.y + wetZone.h - bathH, w: wetZone.w, h: bathH };
+      const kitZone: Rect = fromS
+        ? { x: wetZone.x, y: wetZone.y + bathH, w: wetZone.w, h: kitH }
+        : { x: wetZone.x, y: wetZone.y, w: wetZone.w, h: kitH };
+      stackVertical(bathZone, publicBaths, budgets, rooms, privateOnLeft, rng);
+      placeKitchenInRect(rooms, kitchen.id, utility, kitZone, budgets, fromS, rng);
+    }
 
-    stackVertical(bathZone, publicBaths, budgets, rooms, privateOnLeft, rng);
-    placeKitchenInRect(rooms, kitchen.id, utility, kitZone, budgets, fromS, rng);
     zone = fromS
       ? { x: zone.x, y: zone.y + wetH, w: zone.w, h: zone.h - wetH }
       : { x: zone.x, y: zone.y, w: zone.w, h: zone.h - wetH };
@@ -367,12 +425,17 @@ function packPublicNS(opts: {
     return;
   }
 
-  // Horizontal kitchen strip
-  const kitH = clamp(
+  // Horizontal kitchen strip — size kitchen so living stays within depth/aspect caps
+  const livCap = livingDepthCap(zone.w);
+  let kitH = clamp(
     zone.h * (kitB.targetArea / (kitB.targetArea + livB.targetArea)),
     Math.max(kitB.minHeight, 2.0),
-    zone.h * 0.4,
+    zone.h * 0.55,
   );
+  if (zone.h - kitH > livCap) {
+    kitH = zone.h - livCap;
+  }
+  kitH = clamp(kitH, Math.max(kitB.minHeight, 2.0), zone.h - livingMin);
   const atEntrance = kitchenMode === 'stripEntrance';
   const kitAtDeep = fromS ? !atEntrance : atEntrance;
   const kitchenRect: Rect = kitAtDeep
@@ -449,11 +512,25 @@ function pushLiving(
   absorbPocket: boolean,
 ): void {
   const r = { ...livingRect };
+  const cap = livingDepthCap(r.w);
+  // Only absorb entry pocket when living stays within depth/aspect caps.
   if (absorbPocket) {
-    if (fromS) r.h = H - r.y;
+    const absorbed = { ...r };
+    if (fromS) absorbed.h = H - absorbed.y;
     else {
-      r.y = Math.max(0, r.y - circDepth);
-      r.h += circDepth;
+      absorbed.y = Math.max(0, absorbed.y - circDepth);
+      absorbed.h += circDepth;
+    }
+    if (absorbed.h <= cap + 0.05) {
+      rooms.push(rectRoom(livingId, 'LIVING', absorbed, budgets));
+      return;
+    }
+  }
+  if (r.h > cap + 0.05) {
+    if (fromS) r.h = cap;
+    else {
+      r.y = r.y + r.h - cap;
+      r.h = cap;
     }
   }
   rooms.push(rectRoom(livingId, 'LIVING', r, budgets));
@@ -492,12 +569,12 @@ function orderPrivateStack(
 
 function biasToFrac(bias: LayoutParams['corrBias'], rng: RNG): number {
   switch (bias) {
-    case 'farLeft': return 0.26 + rng.next() * 0.06;
-    case 'left': return 0.34 + rng.next() * 0.08;
-    case 'right': return 0.54 + rng.next() * 0.08;
-    case 'farRight': return 0.64 + rng.next() * 0.08;
+    case 'farLeft': return 0.34 + rng.next() * 0.06;
+    case 'left': return 0.38 + rng.next() * 0.06;
+    case 'right': return 0.52 + rng.next() * 0.06;
+    case 'farRight': return 0.56 + rng.next() * 0.06;
     case 'center':
-    default: return 0.42 + rng.next() * 0.16;
+    default: return 0.44 + rng.next() * 0.12;
   }
 }
 
@@ -544,7 +621,8 @@ function embedEW(input: EmbedInput, style: LayoutStyle): RoomRect[] {
   const ensuites = all(tree, 'ENSUITE_BATHROOM');
   const utility = optional(tree, 'UTILITY');
 
-  const corrW = rng.bool(0.4) ? 1.15 : 1.05;
+  // End-cap entry only shares `corrW` with the corridor — keep that ≥ door+clearance.
+  const corrW = 1.25;
   const entryDepth = clamp(Math.max(budgetFor(budgets, entry.id).minArea / corrW, 1.45), 1.45, 1.7);
   const foyerDepth = foyer
     ? clamp(Math.max(budgetFor(budgets, foyer.id).minArea / corrW, 1.45), 1.45, 1.6)
@@ -553,12 +631,29 @@ function embedEW(input: EmbedInput, style: LayoutStyle): RoomRect[] {
 
   const corrX = fromW ? circDepth : 0;
   const corrLen = W - circDepth;
-  // Living needs ≥3m in the short direction — keep both bands viable
+  // Living needs ≥3m in the short direction — keep both bands furnishable
   const livingMinBand = 3.05;
-  const minBand = Math.min(livingMinBand, (H - corrW) * 0.45);
   const bandFloor = Math.min(livingMinBand, (H - corrW) / 2 - 0.05);
   const corrFrac = biasToFrac(params.corrBias, rng);
-  const corrY = clamp(H * corrFrac, bandFloor, H - corrW - bandFloor);
+  let corrY = clamp(H * corrFrac, bandFloor, H - corrW - bandFloor);
+
+  // Prefer private on the larger band, then clamp so neither wing is a strip.
+  let privateOnTop = corrY >= H - corrY - corrW;
+  const maxPrivH = maxPrivateWingWidth(bedrooms.length, corrLen);
+  // For EW, "wing width" is the band height (orthogonal to corridor).
+  const maxPubH = Math.max(livingMinBand, livingDepthCap(Math.min(6, corrLen * 0.55)) / 2.1);
+  if (privateOnTop) {
+    if (corrY > maxPrivH) corrY = maxPrivH;
+    if (H - corrY - corrW > Math.max(maxPubH, livingMinBand + 0.2)) {
+      corrY = Math.max(bandFloor, H - corrW - Math.max(maxPubH, livingMinBand));
+    }
+  } else {
+    if (H - corrY - corrW > maxPrivH) corrY = Math.max(bandFloor, H - corrW - maxPrivH);
+    if (corrY > Math.max(maxPubH, livingMinBand + 0.2)) {
+      corrY = Math.min(Math.max(maxPubH, livingMinBand), H - corrW - bandFloor);
+    }
+  }
+  corrY = clamp(corrY, bandFloor, H - corrW - bandFloor);
 
   rooms.push(rectRoom(corr.id, 'CORRIDOR', { x: corrX, y: corrY, w: corrLen, h: corrW }, budgets, true));
 
@@ -576,15 +671,10 @@ function embedEW(input: EmbedInput, style: LayoutStyle): RoomRect[] {
 
   const top: Rect = { x: corrX, y: 0, w: corrLen, h: corrY };
   const bottom: Rect = { x: corrX, y: corrY + corrW, w: corrLen, h: H - corrY - corrW };
-
-  // Private (bedrooms) gets the larger band — living is wide enough at min depth
-  const privateOnTop = top.h >= bottom.h
-    ? true
-    : false;
+  privateOnTop = top.h >= bottom.h;
 
   let privateZone = privateOnTop ? top : bottom;
   let publicZone = privateOnTop ? bottom : top;
-  void minBand;
 
   let bedItems = bedrooms.map(bed => {
     const en = ensuites.find(e => e.attachedTo === bed.id);
@@ -662,20 +752,25 @@ function embedEW(input: EmbedInput, style: LayoutStyle): RoomRect[] {
   const kitW = clamp(
     zone.w * (kitB.targetArea / (kitB.targetArea + livB.targetArea)),
     Math.max(kitB.minWidth, 2.1),
-    Math.min(zone.w * 0.4, zone.w - livingMinW),
+    Math.min(zone.w * 0.45, zone.w - livingMinW),
   );
+  const livCap = livingDepthCap(zone.h);
+  let kitWidth = kitW;
+  if (zone.w - kitWidth > livCap) {
+    kitWidth = Math.max(kitW, zone.w - livCap);
+  }
   const kitchenNearEntry = params.kitchenMode === 'stripEntrance' || params.kitchenMode === 'sideOuter';
   const placeKitFar = kitchenNearEntry ? !fromW : fromW;
 
   const kitchenRect: Rect = placeKitFar
-    ? { x: zone.x + zone.w - kitW, y: zone.y, w: kitW, h: zone.h }
-    : { x: zone.x, y: zone.y, w: kitW, h: zone.h };
+    ? { x: zone.x + zone.w - kitWidth, y: zone.y, w: kitWidth, h: zone.h }
+    : { x: zone.x, y: zone.y, w: kitWidth, h: zone.h };
 
   placeKitchenInRect(rooms, kitchen.id, utility, kitchenRect, budgets, true, rng);
 
   const livingRect: Rect = kitchenRect.x <= zone.x + 0.01
-    ? { x: zone.x + kitW, y: zone.y, w: zone.w - kitW, h: zone.h }
-    : { x: zone.x, y: zone.y, w: zone.w - kitW, h: zone.h };
+    ? { x: zone.x + kitWidth, y: zone.y, w: zone.w - kitWidth, h: zone.h }
+    : { x: zone.x, y: zone.y, w: zone.w - kitWidth, h: zone.h };
 
   pushLivingEW(rooms, living.id, livingRect, budgets, fromW, W, circDepth, params.livingPocket && placeKitFar === fromW);
   return rooms;
@@ -692,15 +787,29 @@ function pushLivingEW(
   absorbPocket: boolean,
 ): void {
   const r = { ...livingRect };
+  const cap = livingDepthCap(r.h);
   if (absorbPocket) {
+    const absorbed = { ...r };
     if (fromW) {
-      r.x = 0;
-      r.w = livingRect.x + livingRect.w;
+      absorbed.x = 0;
+      absorbed.w = livingRect.x + livingRect.w;
     } else {
-      r.w = W - r.x;
+      absorbed.w = W - absorbed.x;
+    }
+    if (absorbed.w <= cap + 0.05) {
+      void circDepth;
+      rooms.push(rectRoom(livingId, 'LIVING', absorbed, budgets));
+      return;
     }
   }
   void circDepth;
+  if (r.w > cap + 0.05) {
+    if (fromW) r.w = cap;
+    else {
+      r.x = r.x + r.w - cap;
+      r.w = cap;
+    }
+  }
   rooms.push(rectRoom(livingId, 'LIVING', r, budgets));
 }
 
@@ -738,7 +847,7 @@ function stackVertical(
     const slot: Rect = { x: zone.x, y, w: zone.w, h };
     if (item.ensuiteId) {
       const eb = budgetFor(budgets, item.ensuiteId);
-      const ew = clamp(Math.max(eb.minWidth, eb.minArea / Math.max(1.5, h)), eb.minWidth, zone.w * 0.38);
+      let ew = clamp(Math.max(eb.minWidth, eb.minArea / Math.max(1.5, h)), eb.minWidth, zone.w * 0.38);
       const eh = Math.min(h, Math.max(eb.minHeight, eb.minArea / ew));
       // Prefer side-by-side ensuite (more reliable dims); rare vertical only when tall
       const verticalEnsuite = (rng?.bool(0.12) ?? false) && h >= 3.6 && slot.w < 3.4;
@@ -750,6 +859,11 @@ function stackVertical(
           x: slot.x, y: slot.y, w: slot.w, h: eh,
         }, budgets));
       } else {
+        const maxBedW = bedroomWidthCap(h);
+        const bedTargetW = Math.min(slot.w - ew, maxBedW);
+        if (slot.w - ew > bedTargetW + 0.05) {
+          ew = slot.w - bedTargetW;
+        }
         const ensuiteRect: Rect = ensuiteOnRight
           ? { x: slot.x + slot.w - ew, y: slot.y, w: ew, h: eh }
           : { x: slot.x, y: slot.y, w: ew, h: eh };
@@ -801,10 +915,12 @@ function stackHorizontal(
       const eb = budgetFor(budgets, item.ensuiteId);
       // Cap ensuite width so bedroom keeps min area
       const maxEw = Math.max(eb.minWidth, slot.w - 9.5 / Math.max(slot.h, 2.5));
+      // Keep ensuite proportion furnishable (avoid 1.2×3.7 strips).
+      const minEwForAspect = slot.h / 3.2;
       const ew = clamp(
-        Math.max(eb.minWidth, eb.minArea / Math.max(1.5, zone.h)),
+        Math.max(eb.minWidth, eb.minArea / Math.max(1.5, zone.h), minEwForAspect),
         eb.minWidth,
-        Math.min(slot.w * 0.35, maxEw),
+        Math.min(slot.w * 0.42, maxEw),
       );
       const ensuiteOnLeft = rng?.bool(0.5) ?? true;
       const ensuiteRect: Rect = ensuiteOnLeft
